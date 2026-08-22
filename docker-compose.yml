@@ -1,0 +1,132 @@
+# Fase 6 — Pipeline completo empaquetado: storage (MinIO + TimescaleDB, de
+# la Fase 4) más la ingesta y la API corriendo también en contenedores.
+# Un solo `docker compose up -d` levanta todo.
+#
+# Requisitos antes de correrlo:
+#   1) Un archivo .env en esta misma carpeta con tus credenciales de Kalshi
+#      y (opcionalmente) las variables de TimescaleDB/MinIO -- ver
+#      .env.example. Sin .env, los servicios de storage arrancan igual
+#      (tienen defaults), pero la ingesta de Kalshi va a fallar por falta
+#      de credenciales.
+#   2) La clave privada de Kalshi en secrets/kalshi_private_key.pem (se
+#      monta como volumen de solo lectura -- nunca se copia a la imagen,
+#      ver Dockerfile.ingestion).
+#
+# Uso:
+#   docker compose up -d --build
+#   docker compose logs -f ingestion   (ver los logs de la ingesta en vivo)
+#   docker compose logs -f api
+#   docker compose down                (parar, conserva los datos)
+#   docker compose down -v             (parar y borrar los datos -- empezar de cero)
+#
+# La API queda en http://localhost:8000/docs
+
+services:
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: market_data_timescaledb
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${TIMESCALE_DB:-market_data}
+      POSTGRES_USER: ${TIMESCALE_USER:-market_data}
+      POSTGRES_PASSWORD: ${TIMESCALE_PASSWORD:-market_data}
+    ports:
+      - "5432:5432"
+    volumes:
+      - timescale_data:/var/lib/postgresql/data
+      - ./storage/timescaledb_init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${TIMESCALE_USER:-market_data} -d ${TIMESCALE_DB:-market_data}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    container_name: market_data_minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+    ports:
+      - "9000:9000"   # API S3-compatible (la usa storage/minio_store.py)
+      - "9001:9001"   # Consola web -- http://localhost:9001
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  ingestion:
+    build:
+      context: .
+      dockerfile: Dockerfile.ingestion
+    container_name: market_data_ingestion
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Dentro de la red de Docker Compose los servicios se resuelven por
+      # nombre, no por localhost -- estas dos pisan lo que traiga el .env
+      # (pensado para correr el pipeline directo con `python` en la
+      # máquina, donde sí es localhost).
+      TIMESCALE_HOST: timescaledb
+      MINIO_ENDPOINT: minio:9000
+    volumes:
+      # La clave privada NUNCA se copia a la imagen (ver Dockerfile.ingestion)
+      # -- se monta acá, de solo lectura.
+      - ./secrets:/app/secrets:ro
+      - ./data:/app/data
+      - ./logs:/app/logs
+      # De lectura/escritura -- la ingesta LEE config/tracked_markets.json al
+      # arrancar (mercados agregados desde el buscador del dashboard, Fase 7).
+      # No escribe acá, pero necesita ver los cambios que hace la API sin
+      # tener que reconstruir la imagen.
+      - ./config:/app/config
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: market_data_api
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      TIMESCALE_HOST: timescaledb
+      MINIO_ENDPOINT: minio:9000
+    ports:
+      - "8000:8000"
+    volumes:
+      # De solo lectura -- la API lee logs/gaps.jsonl para /system/gaps
+      # (Fase 7, dashboard de backoffice), nunca escribe ahí.
+      - ./logs:/app/logs:ro
+      # De lectura/escritura -- POST /discover/track (Fase 7, buscador del
+      # dashboard) escribe acá los mercados que se agregan a trackear.
+      - ./config:/app/config
+      # Socket de Docker del host -- lo usa POST /system/restart_ingestion
+      # (botón "🔄 Reiniciar ingesta" del dashboard) para reiniciar el
+      # contenedor de ingesta después de agregar un mercado nuevo, sin
+      # tener que ir a la terminal. ADVERTENCIA: el socket de Docker no
+      # tiene permisos granulares -- cualquier proceso con acceso acá
+      # puede controlar CUALQUIER contenedor del host, no solo este. Es
+      # un tradeoff consciente para correr en tu propia máquina; si esto
+      # fuera a un servidor compartido, la alternativa correcta es un
+      # docker-socket-proxy que exponga solo la acción de restart sobre
+      # el contenedor de ingesta puntual.
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+
+volumes:
+  timescale_data:
+  minio_data:

@@ -1,0 +1,1418 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Market Data Pipeline — Dashboard</title>
+<style>
+  :root {
+    color-scheme: light;
+    --surface-1:      #fcfcfb;
+    --surface-2:      #f9f9f7;
+    --text-primary:   #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted:     #898781;
+    --gridline:       #e1e0d9;
+    --baseline:       #c3c2b7;
+    --border:         rgba(11,11,11,0.10);
+    --series-1:       #2a78d6; /* Polymarket -- categorical slot 1, fijo */
+    --series-2:       #eb6834; /* Kalshi -- categorical slot 2, fijo */
+    --delta-up:       #006300;
+    --status-good:     #0ca30c;
+    --status-warning:  #fab219;
+    --status-critical: #d03b3b;
+    --diverging-pos:  #2a78d6;
+    --diverging-neg:  #e34948;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--surface-2);
+    color: var(--text-primary);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 14px;
+  }
+  header {
+    background: var(--surface-1);
+    border-bottom: 1px solid var(--border);
+    padding: 16px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  header h1 { font-size: 17px; margin: 0; font-weight: 600; }
+  header .sub { color: var(--text-muted); font-size: 12px; margin-top: 2px; }
+  nav.tabs { display: flex; gap: 4px; }
+  nav.tabs button {
+    border: none; background: transparent; padding: 8px 16px; border-radius: 6px;
+    font-size: 13px; font-weight: 600; color: var(--text-secondary); cursor: pointer;
+  }
+  nav.tabs button.active { background: var(--surface-2); color: var(--text-primary); }
+  .refresh-row { display: flex; align-items: center; gap: 10px; color: var(--text-muted); font-size: 12px; }
+  .refresh-row button {
+    border: 1px solid var(--border); background: var(--surface-1); border-radius: 6px;
+    padding: 6px 10px; cursor: pointer; color: var(--text-secondary); font-size: 12px;
+  }
+  main { padding: 24px; max-width: 1200px; margin: 0 auto; }
+  .page { display: none; }
+  .page.active { display: block; }
+  .grid { display: grid; gap: 16px; }
+  .cards { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+  .card {
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px;
+  }
+  .card h3 { margin: 0 0 8px 0; font-size: 12px; text-transform: uppercase; letter-spacing: .03em; color: var(--text-muted); font-weight: 600; }
+  .status-pill {
+    display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700;
+    padding: 3px 9px; border-radius: 999px; color: #fff;
+  }
+  .status-good { background: var(--status-good); }
+  .status-warning { background: var(--status-warning); color: #3a2c00; }
+  .status-critical { background: var(--status-critical); }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; background: currentColor; }
+  .overall-banner {
+    display: flex; align-items: center; gap: 12px; padding: 16px 20px; border-radius: 10px;
+    font-size: 15px; font-weight: 700; margin-bottom: 20px; color: #fff;
+  }
+  .metric { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .metric-label { color: var(--text-muted); font-size: 12px; margin-top: 2px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; color: var(--text-muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .03em; padding: 8px 10px; border-bottom: 1px solid var(--gridline); }
+  td { padding: 9px 10px; border-bottom: 1px solid var(--gridline); vertical-align: middle; }
+  tr.selectable { cursor: pointer; }
+  tr.selectable:hover { background: var(--surface-2); }
+  tr.selected { background: #eaf2fc; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 700; color: #fff; }
+  .badge-poly { background: var(--series-1); }
+  .badge-kalshi { background: var(--series-2); }
+  .mono { font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 12px; color: var(--text-secondary); }
+  .search-row { margin-bottom: 12px; }
+  .search-row input {
+    width: 100%; padding: 9px 12px; border: 1px solid var(--border); border-radius: 8px;
+    font-size: 13px; background: var(--surface-1); color: var(--text-primary);
+  }
+  .section-title { font-size: 14px; font-weight: 700; margin: 28px 0 12px 0; }
+  .section-title:first-child { margin-top: 0; }
+  .empty-state { color: var(--text-muted); padding: 24px; text-align: center; font-size: 13px; }
+  .warning-banner {
+    background: #fff8e6; border: 1px solid var(--status-warning); color: #6b5300;
+    border-radius: 8px; padding: 10px 14px; font-size: 12px; margin-bottom: 12px;
+  }
+  .error-banner {
+    background: #fdecec; border: 1px solid var(--status-critical); color: #7a1f1f;
+    border-radius: 8px; padding: 10px 14px; font-size: 12px; margin-bottom: 16px;
+  }
+  .spread-pos { color: var(--diverging-pos); font-weight: 700; }
+  .spread-neg { color: var(--diverging-neg); font-weight: 700; }
+  .spread-na { color: var(--text-muted); }
+  .sparkline-caption { color: var(--text-muted); font-size: 11px; margin-top: 6px; }
+  .two-col { display: grid; grid-template-columns: 1.1fr 1fr; gap: 20px; align-items: start; }
+  @media (max-width: 860px) { .two-col { grid-template-columns: 1fr; } }
+  .discover-row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .discover-row input {
+    flex: 1 1 260px; padding: 9px 12px; border: 1px solid var(--border); border-radius: 8px;
+    font-size: 13px; background: var(--surface-2); color: var(--text-primary);
+  }
+  .discover-row select {
+    padding: 9px 10px; border: 1px solid var(--border); border-radius: 8px;
+    font-size: 13px; background: var(--surface-2); color: var(--text-primary);
+  }
+  .discover-row button {
+    border: 1px solid var(--series-1); background: var(--series-1); color: #fff; border-radius: 8px;
+    padding: 9px 16px; font-size: 13px; font-weight: 600; cursor: pointer;
+  }
+  .discover-row button.secondary {
+    background: var(--surface-1); color: var(--text-primary); border-color: var(--border);
+  }
+  .discover-row button:disabled { opacity: .6; cursor: default; }
+  .action-btn {
+    border: 1px solid var(--series-1); background: var(--series-1); color: #fff; border-radius: 8px;
+    padding: 9px 16px; font-size: 13px; font-weight: 600; cursor: pointer;
+  }
+  .action-btn.secondary { background: var(--surface-1); color: var(--text-primary); border-color: var(--border); }
+  .action-btn:disabled { opacity: .6; cursor: default; }
+  .discover-card .price-row { display: flex; gap: 14px; margin-top: 6px; flex-wrap: wrap; }
+  .discover-card .price-row .metric-label { margin-top: 0; }
+  .discover-card {
+    border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin-bottom: 8px;
+    display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+    background: var(--surface-2);
+  }
+  .discover-card .title { font-size: 13px; font-weight: 600; }
+  .discover-card .outcomes { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+  .add-btn {
+    border: 1px solid var(--status-good); background: #fff; color: var(--status-good); border-radius: 6px;
+    padding: 5px 10px; font-size: 12px; font-weight: 600; cursor: pointer;
+  }
+  .add-btn:disabled { border-color: var(--text-muted); color: var(--text-muted); cursor: default; }
+  .del-btn {
+    border: 1px solid var(--border); background: #fff; color: var(--text-muted); border-radius: 6px;
+    padding: 4px 8px; font-size: 12px; cursor: pointer; line-height: 1;
+  }
+  .del-btn:hover, .del-btn.confirm { border-color: var(--status-critical); color: var(--status-critical); }
+  .del-btn.confirm { font-weight: 600; }
+  .del-btn:disabled { opacity: .5; cursor: default; }
+  .acct-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+  .acct-header .title { font-size: 14px; font-weight: 700; }
+  .not-connected-card {
+    border: 1px dashed var(--border); border-radius: 10px; padding: 20px; text-align: center;
+    color: var(--text-muted); font-size: 13px; background: var(--surface-1);
+  }
+  .example-tag {
+    display: inline-block; font-size: 10px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: .04em; color: var(--text-muted); background: var(--surface-2);
+    border: 1px solid var(--border); border-radius: 999px; padding: 2px 8px; margin-left: 8px;
+  }
+  .pnl-pos { color: var(--diverging-pos); }
+  .pnl-neg { color: var(--diverging-neg); }
+  .legend-row { display: flex; gap: 16px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
+  .legend-item { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); }
+  .legend-swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>Market Data Pipeline</h1>
+    <div class="sub">Polymarket + Kalshi — datos en vivo</div>
+  </div>
+  <nav class="tabs">
+    <button id="tab-btn-trading" class="active">Mesa de Trading</button>
+    <button id="tab-btn-accounts">Cuentas</button>
+    <button id="tab-btn-backoffice">Backoffice / Infraestructura</button>
+  </nav>
+  <div class="refresh-row">
+    <span id="last-refreshed">—</span>
+    <button id="refresh-btn">Actualizar ahora</button>
+  </div>
+</header>
+
+<main>
+  <div id="global-error"></div>
+
+  <!-- ===================== TAB 1: MESA DE TRADING ===================== -->
+  <section id="page-trading" class="page active">
+    <div class="two-col">
+      <div>
+        <div class="section-title" style="margin-top:0; display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;">
+          <span>Mercados trackeados</span>
+          <button id="resolve-labels-btn" class="action-btn secondary" style="font-weight:600; font-size:12px; padding:6px 12px;">🔎 Resolver nombres faltantes</button>
+        </div>
+        <div id="resolve-labels-status" class="metric-label" style="margin-bottom:8px;"></div>
+        <div class="search-row">
+          <input id="market-search" type="text" placeholder="Filtrar por market_id, outcome_id o fuente…">
+        </div>
+        <div class="card" style="padding:0;">
+          <table>
+            <thead>
+              <tr><th>Fuente</th><th>Market</th><th>Outcome</th><th>Último evento</th><th>Hace</th><th></th></tr>
+            </thead>
+            <tbody id="markets-tbody"></tbody>
+          </table>
+          <div id="markets-empty" class="empty-state" style="display:none;">
+            Todavía no hay mercados con datos. Inicia la ingesta (<span class="mono">docker compose logs -f ingestion</span>) y espera unos segundos.
+          </div>
+        </div>
+      </div>
+
+      <div id="market-detail">
+        <div class="empty-state">Elige un mercado de la lista para ver su precio.</div>
+      </div>
+    </div>
+
+    <div class="section-title">Spread cross-platform (pares confirmados en config/market_mapping.json)</div>
+    <div class="card" style="padding:0;">
+      <table>
+        <thead>
+          <tr><th>Evento</th><th>Polymarket bid</th><th>Kalshi bid</th><th>Spread</th></tr>
+        </thead>
+        <tbody id="spread-tbody"></tbody>
+      </table>
+      <div id="spread-empty" class="empty-state" style="display:none;">No hay pares cargados en config/market_mapping.json.</div>
+    </div>
+
+    <div class="section-title" style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
+      <span>🪞 Sugerencias de mercados espejo (posible arbitraje)</span>
+      <button id="mirror-search-btn" class="action-btn secondary">Buscar candidatos</button>
+    </div>
+    <div class="card">
+      <div style="color:var(--text-muted); font-size:12px; margin-bottom:10px;">
+        Compara por similitud de título Y de precio los mercados de Polymarket y Kalshi para sugerir posibles pares equivalentes — NO es una confirmación de que sea el mismo evento (revisa reglas de resolución, fecha, banda de valores antes de confirmar). Nada se agrega a <span class="mono">config/market_mapping.json</span> hasta que presionas "Confirmar" en un candidato puntual. <b>Recomendado: usa palabras clave</b> — sin eso se compara "lo más movido en volumen" de cada plataforma, que en la práctica suele no superponerse en tema entre Polymarket y Kalshi (una tiene mucho esports/props deportivos puntuales en su top, la otra no), así que puede no encontrar nada aunque el mercado exista en las dos.
+      </div>
+      <div class="discover-row">
+        <input id="mirror-keywords" type="text" placeholder="Palabras clave (recomendado) — ej: fed, election, bitcoin…" style="flex:1; min-width:220px;">
+      </div>
+      <div class="discover-row" style="margin-top:6px;">
+        <input id="mirror-min-score" type="number" min="0" max="100" step="1" value="45" style="width:150px;" placeholder="Score mín. (0-100)">
+        <input id="mirror-min-volume" type="number" min="0" step="1" placeholder="Vol 24h mín. (opcional)" style="width:170px;">
+        <input id="mirror-max-price-spread" type="number" min="0" max="1" step="0.01" value="0.35" style="width:190px;" placeholder="Spread precio máx. (0-1)">
+      </div>
+      <div id="mirror-status" style="color:var(--text-muted); font-size:12px; margin:8px 0;"></div>
+      <div id="mirror-candidates"></div>
+      <div id="mirror-empty" class="empty-state" style="display:none;">Sin candidatos todavía — presiona "Buscar candidatos".</div>
+    </div>
+
+    <div class="section-title">Descubrir y agregar mercados</div>
+    <div class="card">
+      <div style="color:var(--text-muted); font-size:12px; margin-bottom:10px;">
+        Esto busca en vivo en las APIs de Polymarket y Kalshi (no solo en lo que el pipeline ya está trackeando arriba). Ni Polymarket ni Kalshi ofrecen búsqueda de texto nativa en su API de mercados, así que se trae una página de mercados activos y se filtra aquí por palabra clave — puede no encontrar todo. También puedes pegar directo un link de un evento/mercado (ej. <span class="mono">polymarket.com/event/…</span> o <span class="mono">kalshi.com/markets/…</span>) y lo resuelve exacto contra la API, sin depender del filtro por palabra clave. La categoría tampoco es un filtro nativo de ninguna de las dos plataformas: es una lista de palabras clave armada a mano por categoría (ver <span class="mono">CATEGORY_KEYWORDS</span> en <span class="mono">tools/market_matcher.py</span>), así que un mercado puede quedar afuera si su título no usa ninguna de esas palabras. Agregar un mercado lo guarda en <span class="mono">config/tracked_markets.json</span>; hace falta reiniciar la ingesta (<span class="mono">docker compose restart ingestion</span>) para que empiece a recibir sus datos.
+      </div>
+      <div class="discover-row">
+        <input id="discover-search" type="text" placeholder="Ej: election, fed, bitcoin… o pega un link de polymarket.com / kalshi.com">
+        <select id="discover-source">
+          <option value="all">Ambas fuentes</option>
+          <option value="polymarket">Solo Polymarket</option>
+          <option value="kalshi">Solo Kalshi</option>
+        </select>
+        <select id="discover-category">
+          <option value="">Todas las categorías</option>
+        </select>
+        <input id="discover-min-volume" type="number" min="0" step="1" placeholder="Vol 24h mín. (USD)" style="width:150px;">
+        <button id="discover-btn">Buscar</button>
+        <button id="trending-btn" class="secondary">🔥 Ver tendencias (24h)</button>
+        <button id="live-btn" class="secondary">📡 Mercados en vivo</button>
+      </div>
+      <div class="metric-label" style="margin-top:6px;">El filtro de volumen mínimo se aplica en los tres modos (Buscar / Tendencias / En vivo). En "En vivo" por defecto no se exige volumen — poner un mínimo ahí sí empieza a filtrar.</div>
+      <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-top:8px;">
+        <div id="discover-status" class="metric-label"></div>
+        <button id="restart-ingestion-btn-discover" class="action-btn secondary" style="display:none;">🔄 Reiniciar ingesta</button>
+      </div>
+      <div id="discover-results" style="margin-top:12px;"></div>
+    </div>
+  </section>
+
+  <!-- ===================== TAB 2: CUENTAS ===================== -->
+  <section id="page-accounts" class="page">
+    <div class="warning-banner">
+      Estos números vienen directo de la API de cada plataforma (lectura, ningún endpoint aquí puede crear ni cancelar órdenes). El P&amp;L realizado se reconstruye a partir de las liquidaciones (<span class="mono">settlements</span>) de cada mercado ya cerrado, no de los fills individuales.
+    </div>
+
+    <div class="acct-header">
+      <span class="badge badge-kalshi">kalshi</span>
+      <span class="title">Cuenta Kalshi</span>
+    </div>
+    <div id="kalshi-not-connected" class="not-connected-card" style="display:none;"></div>
+    <div id="kalshi-connected-wrap" style="display:none;">
+      <div class="grid cards">
+        <div class="card">
+          <h3>Balance disponible</h3>
+          <div id="kalshi-balance" class="metric">—</div>
+        </div>
+        <div class="card">
+          <h3>Valor de portfolio</h3>
+          <div id="kalshi-portfolio-value" class="metric">—</div>
+        </div>
+        <div class="card">
+          <h3>Exposición (posiciones abiertas)</h3>
+          <div id="kalshi-exposure" class="metric">—</div>
+          <div class="metric-label" id="kalshi-open-count">—</div>
+        </div>
+        <div class="card">
+          <h3>P&amp;L acumulado (liquidado)</h3>
+          <div id="kalshi-cum-pnl" class="metric">—</div>
+          <div class="metric-label" id="kalshi-settled-count">—</div>
+        </div>
+        <div class="card">
+          <h3>Win rate</h3>
+          <div id="kalshi-winrate" class="metric">—</div>
+          <div class="metric-label" id="kalshi-wl-count">—</div>
+        </div>
+        <div class="card">
+          <h3>Mejor / peor trade liquidado</h3>
+          <div id="kalshi-best-worst" style="font-size:13px; margin-top:4px;">—</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="acct-header" style="margin-top:28px;">
+      <span class="badge badge-poly">polymarket</span>
+      <span class="title">Cuenta Polymarket</span>
+      <span class="example-tag">Ejemplo — no conectado</span>
+    </div>
+    <div id="poly-connected-wrap">
+      <div class="metric-label" id="poly-note" style="margin-bottom:10px;"></div>
+      <div class="grid cards">
+        <div class="card">
+          <h3>Balance disponible</h3>
+          <div id="poly-balance" class="metric">—</div>
+        </div>
+        <div class="card">
+          <h3>Valor de portfolio</h3>
+          <div id="poly-portfolio-value" class="metric">—</div>
+        </div>
+        <div class="card">
+          <h3>Exposición (posiciones abiertas)</h3>
+          <div id="poly-exposure" class="metric">—</div>
+          <div class="metric-label" id="poly-open-count">—</div>
+        </div>
+        <div class="card">
+          <h3>P&amp;L acumulado (liquidado)</h3>
+          <div id="poly-cum-pnl" class="metric">—</div>
+          <div class="metric-label" id="poly-settled-count">—</div>
+        </div>
+        <div class="card">
+          <h3>Win rate</h3>
+          <div id="poly-winrate" class="metric">—</div>
+          <div class="metric-label" id="poly-wl-count">—</div>
+        </div>
+        <div class="card">
+          <h3>Mejor / peor trade liquidado</h3>
+          <div id="poly-best-worst" style="font-size:13px; margin-top:4px;">—</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section-title">Evolución del P&amp;L acumulado (Kalshi, por día liquidado)</div>
+    <div class="card">
+      <div id="pnl-chart-container"><div class="empty-state">Cargando…</div></div>
+    </div>
+
+    <div class="section-title">Trades históricos (Kalshi — fills recientes)</div>
+    <div class="card" style="padding:0;">
+      <table>
+        <thead>
+          <tr><th>Fecha</th><th>Ticker</th><th>Lado</th><th>Cantidad</th><th>Precio</th><th>Fee</th><th>Taker</th></tr>
+        </thead>
+        <tbody id="fills-tbody"></tbody>
+      </table>
+      <div id="fills-empty" class="empty-state" style="display:none;">Sin fills todavía.</div>
+    </div>
+  </section>
+
+  <!-- ===================== TAB 3: BACKOFFICE ===================== -->
+  <section id="page-backoffice" class="page">
+    <div id="overall-banner" class="overall-banner">Cargando estado del sistema…</div>
+
+    <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:16px;">
+      <button id="restart-ingestion-btn-bo" class="action-btn secondary">🔄 Reiniciar ingesta</button>
+      <div id="restart-ingestion-status-bo" class="metric-label"></div>
+    </div>
+
+    <div class="grid cards">
+      <div class="card">
+        <h3>TimescaleDB</h3>
+        <div id="status-timescaledb">—</div>
+      </div>
+      <div class="card">
+        <h3>MinIO</h3>
+        <div id="status-minio">—</div>
+      </div>
+      <div class="card">
+        <h3>Feed Polymarket</h3>
+        <div id="status-polymarket">—</div>
+      </div>
+      <div class="card">
+        <h3>Feed Kalshi</h3>
+        <div id="status-kalshi">—</div>
+      </div>
+    </div>
+
+    <div class="section-title">Gaps recientes (logs/gaps.jsonl)</div>
+    <div class="card" style="padding:0;">
+      <table>
+        <thead>
+          <tr><th>Fuente</th><th>Tipo</th><th>Inicio</th><th>Duración</th><th>Detalle</th></tr>
+        </thead>
+        <tbody id="gaps-tbody"></tbody>
+      </table>
+      <div id="gaps-empty" class="empty-state" style="display:none;">Sin gaps registrados — buena señal.</div>
+    </div>
+  </section>
+</main>
+
+<script>
+const REFRESH_MS_TRADING = 8000;
+const REFRESH_MS_ACCOUNTS = 15000;
+const REFRESH_MS_BACKOFFICE = 5000;
+
+let currentTab = 'trading';
+let selectedOutcomeId = null;
+let refreshTimer = null;
+
+function fmtRelative(iso) {
+  if (!iso) return '—';
+  const secs = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (secs < 0) return 'ahora';
+  if (secs < 60) return `hace ${Math.round(secs)}s`;
+  if (secs < 3600) return `hace ${Math.round(secs / 60)}m`;
+  return `hace ${Math.round(secs / 3600)}h`;
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function truncateMiddle(s, n = 18) {
+  if (!s || s.length <= n) return s || '—';
+  return s.slice(0, n / 2) + '…' + s.slice(-n / 2);
+}
+
+async function fetchJson(path) {
+  const res = await fetch(path);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail || `${res.status} en ${path}`);
+  }
+  return res.json();
+}
+
+function showGlobalError(msg) {
+  document.getElementById('global-error').innerHTML =
+    `<div class="error-banner">No se pudo actualizar: ${escapeHtml(msg)}</div>`;
+}
+function clearGlobalError() {
+  document.getElementById('global-error').innerHTML = '';
+}
+
+// ---------------------- TAB 1: MESA DE TRADING ----------------------
+
+let allMarkets = [];
+
+async function loadMarkets() {
+  const data = await fetchJson('/markets');
+  allMarkets = data.markets || [];
+  renderMarketsTable();
+  if (!selectedOutcomeId && allMarkets.length > 0) {
+    selectedOutcomeId = allMarkets[0].outcome_id;
+  }
+  if (selectedOutcomeId) await loadMarketDetail(selectedOutcomeId);
+}
+
+function marketCellHtml(m) {
+  // Con nombre legible en config/market_labels.json (agregado vía
+  // /discover/track), muestra el título en texto normal y el
+  // condition_id/ticker crudo como subtexto chico -- sin nombre, cae de
+  // vuelta al ID crudo como antes (ver docstring de /markets).
+  if (m.title) {
+    return `<div>${escapeHtml(m.title)}</div><div class="mono metric-label" style="margin-top:2px;" title="${escapeHtml(m.market_id || '')}">${escapeHtml(truncateMiddle(m.market_id, 18))}</div>`;
+  }
+  return `<span class="mono" title="${escapeHtml(m.market_id || '')}">${escapeHtml(truncateMiddle(m.market_id, 20))}</span>`;
+}
+
+function outcomeCellHtml(m) {
+  if (m.outcome_label) {
+    return `<div>${escapeHtml(m.outcome_label)}</div><div class="mono metric-label" style="margin-top:2px;" title="${escapeHtml(m.outcome_id || '')}">${escapeHtml(truncateMiddle(m.outcome_id, 14))}</div>`;
+  }
+  return `<span class="mono" title="${escapeHtml(m.outcome_id || '')}">${escapeHtml(truncateMiddle(m.outcome_id, 20))}</span>`;
+}
+
+function renderMarketsTable() {
+  const q = document.getElementById('market-search').value.trim().toLowerCase();
+  const filtered = allMarkets.filter(m =>
+    !q || (m.market_id || '').toLowerCase().includes(q) ||
+    (m.outcome_id || '').toLowerCase().includes(q) ||
+    (m.source || '').toLowerCase().includes(q) ||
+    (m.title || '').toLowerCase().includes(q) ||
+    (m.outcome_label || '').toLowerCase().includes(q)
+  );
+  const tbody = document.getElementById('markets-tbody');
+  document.getElementById('markets-empty').style.display = filtered.length ? 'none' : 'block';
+  tbody.innerHTML = filtered.map((m, i) => `
+    <tr class="selectable ${m.outcome_id === selectedOutcomeId ? 'selected' : ''}" data-outcome="${escapeHtml(m.outcome_id)}">
+      <td><span class="badge ${m.source === 'polymarket' ? 'badge-poly' : 'badge-kalshi'}">${escapeHtml(m.source)}</span></td>
+      <td>${marketCellHtml(m)}</td>
+      <td>${outcomeCellHtml(m)}</td>
+      <td>${escapeHtml(m.last_event_type || '—')}</td>
+      <td>${fmtRelative(m.last_seen)}</td>
+      <td><button class="del-btn" id="untrack-${i}" title="Eliminar del dashboard">🗑</button></td>
+    </tr>
+  `).join('');
+  tbody.querySelectorAll('tr[data-outcome]').forEach(tr => {
+    tr.addEventListener('click', () => {
+      selectedOutcomeId = tr.getAttribute('data-outcome');
+      renderMarketsTable();
+      loadMarketDetail(selectedOutcomeId);
+    });
+  });
+  filtered.forEach((m, i) => {
+    const btn = document.getElementById(`untrack-${i}`);
+    if (btn) btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      untrackMarket(m, btn);
+    });
+  });
+}
+
+function buildSparkline(events) {
+  // Sparkline honesto: grafica el campo "price" de cada book_update tal
+  // como llegó (no es un best-bid reconstruido punto a punto -- eso
+  // requeriría reconstruir el book en cada instante, ver
+  // common/orderbook.py). Sirve para ver la tendencia reciente, no como
+  // serie de precio oficial.
+  const pts = events
+    .filter(e => e.price !== null && e.price !== undefined)
+    .map(e => ({ t: e.received_at, p: parseFloat(e.price) }))
+    .reverse(); // events vienen más reciente primero -> cronológico
+  if (pts.length < 2) return '<div class="sparkline-caption">No hay suficientes eventos con precio para graficar.</div>';
+
+  const W = 400, H = 80, PAD = 8;
+  const prices = pts.map(p => p.p);
+  const min = Math.min(...prices), max = Math.max(...prices);
+  const range = (max - min) || 1;
+  const x = i => PAD + (i / (pts.length - 1)) * (W - 2 * PAD);
+  const y = p => H - PAD - ((p - min) / range) * (H - 2 * PAD);
+
+  const path = pts.map((p, i) => `${i === 0 ? 'M' : 'L'} ${x(i).toFixed(1)} ${y(p.p).toFixed(1)}`).join(' ');
+  const circles = pts.map((p, i) =>
+    `<circle cx="${x(i).toFixed(1)}" cy="${y(p.p).toFixed(1)}" r="2.5" fill="var(--series-1)"><title>${escapeHtml(p.t)}: ${p.p}</title></circle>`
+  ).join('');
+
+  return `
+    <svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" role="img" aria-label="Tendencia reciente de precio">
+      <line x1="${PAD}" y1="${H - PAD}" x2="${W - PAD}" y2="${H - PAD}" stroke="var(--baseline)" stroke-width="1"/>
+      <path d="${path}" fill="none" stroke="var(--series-1)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      ${circles}
+    </svg>
+    <div class="sparkline-caption">Últimos ${pts.length} eventos con precio (no es el best-bid reconstruido, ver /price para eso).</div>
+  `;
+}
+
+async function loadMarketDetail(outcomeId) {
+  const container = document.getElementById('market-detail');
+  try {
+    const [price, historyData] = await Promise.all([
+      fetchJson(`/price/${encodeURIComponent(outcomeId)}`),
+      fetchJson(`/history/${encodeURIComponent(outcomeId)}?limit=50`).catch(() => ({ events: [] })),
+    ]);
+
+    const warning = price.warning
+      ? `<div class="warning-banner">${escapeHtml(price.warning)}</div>` : '';
+
+    // Si el mercado seleccionado tiene nombre legible (ver marketCellHtml
+    // / /markets), lo mostramos arriba en vez de solo el ID crudo.
+    const selected = allMarkets.find(m => m.outcome_id === outcomeId);
+    const headerHtml = (selected && selected.title)
+      ? `<div style="font-size:14px; font-weight:600; margin-bottom:2px;">${escapeHtml(selected.title)}${selected.outcome_label ? ` — ${escapeHtml(selected.outcome_label)}` : ''}</div>
+         <div class="mono metric-label" style="margin-bottom:10px;" title="${escapeHtml(outcomeId)}">${escapeHtml(truncateMiddle(outcomeId, 40))}</div>`
+      : `<div class="mono" style="margin-bottom:10px;" title="${escapeHtml(outcomeId)}">${escapeHtml(truncateMiddle(outcomeId, 40))}</div>`;
+
+    container.innerHTML = `
+      <div class="card">
+        <h3>Precio actual</h3>
+        ${headerHtml}
+        ${warning}
+        <div class="grid cards" style="grid-template-columns: repeat(3, 1fr); margin-bottom: 14px;">
+          <div>
+            <div class="metric">${price.best_bid ?? '—'}</div>
+            <div class="metric-label">Best bid</div>
+          </div>
+          <div>
+            <div class="metric">${price.best_ask ?? '—'}</div>
+            <div class="metric-label">Best ask</div>
+          </div>
+          <div>
+            <div class="metric">${price.midpoint ?? '—'}</div>
+            <div class="metric-label">Punto medio</div>
+          </div>
+        </div>
+        ${buildSparkline(historyData.events || [])}
+        <div class="sparkline-caption" style="margin-top:10px;">
+          Actualizado: ${fmtRelative(price.as_of)} · ${price.n_events_used} eventos usados en la reconstrucción
+        </div>
+      </div>
+    `;
+  } catch (e) {
+    container.innerHTML = `<div class="error-banner">No se pudo cargar el precio: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+async function loadSpread() {
+  const data = await fetchJson('/spread');
+  const pairs = data.pairs || [];
+  const tbody = document.getElementById('spread-tbody');
+  document.getElementById('spread-empty').style.display = pairs.length ? 'none' : 'block';
+  tbody.innerHTML = pairs.map(p => {
+    let spreadCell;
+    if (p.spread === null || p.spread === undefined) {
+      spreadCell = `<span class="spread-na" title="${escapeHtml(p.spread_unavailable_reason || '')}">n/d</span>`;
+    } else {
+      const val = parseFloat(p.spread);
+      const cls = val > 0 ? 'spread-pos' : (val < 0 ? 'spread-neg' : 'spread-na');
+      const sign = val > 0 ? '+' : '';
+      spreadCell = `<span class="${cls}">${sign}${p.spread}</span>`;
+    }
+    return `
+      <tr>
+        <td>${escapeHtml(p.descripcion || '')}</td>
+        <td>${p.polymarket_best_bid ?? '<span class="spread-na">n/d</span>'}</td>
+        <td>${p.kalshi_best_bid ?? '<span class="spread-na">n/d</span>'}</td>
+        <td>${spreadCell}</td>
+      </tr>
+    `;
+  }).join('');
+}
+
+// -------- Descubrir y agregar mercados (búsqueda en vivo, no solo lo trackeado) --------
+
+function getMinVolumeParam() {
+  const raw = document.getElementById('discover-min-volume').value;
+  if (raw === '' || raw === null) return null;
+  const n = parseFloat(raw);
+  return isNaN(n) || n < 0 ? null : n;
+}
+
+function looksLikeMarketLink(text) {
+  return /^https?:\/\//i.test(text) && /(polymarket\.com|kalshi\.com)/i.test(text);
+}
+
+async function runLinkResolve(url) {
+  const statusEl = document.getElementById('discover-status');
+  const resultsEl = document.getElementById('discover-results');
+  const btn = document.getElementById('discover-btn');
+
+  btn.disabled = true;
+  statusEl.textContent = 'Resolviendo el link…';
+  resultsEl.innerHTML = '';
+
+  try {
+    const params = new URLSearchParams({ url });
+    const data = await fetchJson(`/discover/resolve_link?${params.toString()}`);
+    const results = data.results || [];
+    statusEl.textContent = `${results.length} mercado(s) encontrado(s) en ese link.`;
+    if (!results.length) {
+      resultsEl.innerHTML = '<div class="empty-state">Sin resultados para ese link.</div>';
+    } else {
+      resultsEl.innerHTML = results.map((m, i) => renderDiscoverCard(m, i)).join('');
+      results.forEach((m, i) => wireDiscoverCard(m, i));
+    }
+  } catch (e) {
+    statusEl.textContent = `No se pudo completar: ${e.message}`;
+    showGlobalError(e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function runDiscoverSearch() {
+  const q = document.getElementById('discover-search').value.trim();
+  const source = document.getElementById('discover-source').value;
+  const category = document.getElementById('discover-category').value;
+  const minVolume = getMinVolumeParam();
+  const statusEl = document.getElementById('discover-status');
+  const resultsEl = document.getElementById('discover-results');
+  const btn = document.getElementById('discover-btn');
+
+  if (looksLikeMarketLink(q)) {
+    return runLinkResolve(q);
+  }
+
+  if (q.length > 0 && q.length < 2) {
+    statusEl.textContent = 'Escribe al menos 2 caracteres, o déjalo vacío y elige una categoría.';
+    return;
+  }
+  if (!q && !category) {
+    statusEl.textContent = 'Escribe una palabra clave, pega un link de polymarket.com/kalshi.com, o elige una categoría.';
+    return;
+  }
+
+  btn.disabled = true;
+  statusEl.textContent = 'Buscando en Polymarket/Kalshi…';
+  resultsEl.innerHTML = '';
+
+  try {
+    const params = new URLSearchParams({ source });
+    if (q) params.set('q', q);
+    if (category) params.set('category', category);
+    if (minVolume !== null) params.set('min_volume', String(minVolume));
+    const data = await fetchJson(`/discover/markets?${params.toString()}`);
+    const results = data.results || [];
+    const label = [q ? `"${q}"` : null, category || null].filter(Boolean).join(' + ') || 'la búsqueda';
+    statusEl.textContent = `${results.length} resultado(s) para ${label}` +
+      (minVolume !== null ? ` con vol 24h ≥ ${fmtUsd(minVolume) || minVolume}` : '') +
+      `.` + (data.note ? ` ${data.note}` : '');
+    if (!results.length) {
+      resultsEl.innerHTML = '<div class="empty-state">Sin resultados. Prueba otra palabra clave (el filtro es por texto exacto en el título, no búsqueda difusa).</div>';
+    } else {
+      resultsEl.innerHTML = results.map((m, i) => renderDiscoverCard(m, i)).join('');
+      results.forEach((m, i) => wireDiscoverCard(m, i));
+    }
+  } catch (e) {
+    statusEl.textContent = `No se pudo completar: ${e.message}`;
+    showGlobalError(e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function runTrendingSearch() {
+  const source = document.getElementById('discover-source').value;
+  const category = document.getElementById('discover-category').value;
+  const minVolume = getMinVolumeParam();
+  const statusEl = document.getElementById('discover-status');
+  const resultsEl = document.getElementById('discover-results');
+  const btn = document.getElementById('trending-btn');
+
+  btn.disabled = true;
+  statusEl.textContent = 'Trayendo mercados en tendencia (24h)…';
+  resultsEl.innerHTML = '';
+
+  try {
+    const params = new URLSearchParams({ source, limit: '10' });
+    if (category) params.set('category', category);
+    if (minVolume !== null) params.set('min_volume', String(minVolume));
+    const data = await fetchJson(`/discover/trending?${params.toString()}`);
+    const results = data.results || [];
+    statusEl.textContent = `Top ${results.length} por volumen en las últimas 24h` + (category ? ` — ${category}` : '') +
+      (minVolume !== null ? ` — vol 24h ≥ ${fmtUsd(minVolume) || minVolume}.` : '.');
+    if (!results.length) {
+      resultsEl.innerHTML = '<div class="empty-state">Sin datos de tendencia disponibles ahora mismo.</div>';
+    } else {
+      resultsEl.innerHTML = results.map((m, i) => renderDiscoverCard(m, i)).join('');
+      results.forEach((m, i) => wireDiscoverCard(m, i));
+    }
+  } catch (e) {
+    statusEl.textContent = `No se pudo completar: ${e.message}`;
+    showGlobalError(e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function runLiveSearch() {
+  const source = document.getElementById('discover-source').value;
+  const category = document.getElementById('discover-category').value;
+  const minVolume = getMinVolumeParam();
+  const statusEl = document.getElementById('discover-status');
+  const resultsEl = document.getElementById('discover-results');
+  const btn = document.getElementById('live-btn');
+
+  btn.disabled = true;
+  statusEl.textContent = 'Trayendo mercados abiertos ahora mismo…';
+  resultsEl.innerHTML = '';
+
+  try {
+    const params = new URLSearchParams({ source, limit: '10' });
+    if (category) params.set('category', category);
+    if (minVolume !== null) params.set('min_volume', String(minVolume));
+    const data = await fetchJson(`/discover/live?${params.toString()}`);
+    const results = data.results || [];
+    statusEl.textContent = `${results.length} mercado(s) abierto(s) ahora` + (category ? ` — ${category}` : '') +
+      (minVolume !== null ? ` — vol 24h ≥ ${fmtUsd(minVolume) || minVolume}.` : ` — sin filtrar por volumen (para eso, pon un mínimo o prueba "Ver tendencias").`);
+    if (!results.length) {
+      resultsEl.innerHTML = '<div class="empty-state">Sin mercados abiertos disponibles ahora mismo.</div>';
+    } else {
+      resultsEl.innerHTML = results.map((m, i) => renderDiscoverCard(m, i)).join('');
+      results.forEach((m, i) => wireDiscoverCard(m, i));
+    }
+  } catch (e) {
+    statusEl.textContent = `No se pudo completar: ${e.message}`;
+    showGlobalError(e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function fmtUsd(v) {
+  if (v === null || v === undefined) return null;
+  const n = parseFloat(v);
+  if (isNaN(n)) return null;
+  if (n >= 1000) return `$${Math.round(n / 1000)}k`;
+  return `$${Math.round(n)}`;
+}
+
+function renderDiscoverCard(m, i) {
+  const badgeClass = m.source === 'polymarket' ? 'badge-poly' : 'badge-kalshi';
+  let actionHtml;
+  if (m.source === 'polymarket') {
+    const outs = (m.outcomes || []).filter(o => o.token_id);
+    actionHtml = outs.length
+      ? `<div class="outcomes">${outs.map((o, oi) => `<button class="add-btn" id="add-${i}-${oi}">+ ${escapeHtml(o.label || 'outcome')}</button>`).join('')}</div>`
+      : '<span class="metric-label">Sin token_ids disponibles</span>';
+  } else {
+    actionHtml = `<button class="add-btn" id="add-${i}-0">+ Agregar (${escapeHtml(m.market_id || '')})</button>`;
+  }
+
+  // Precios "en vivo" (al momento de la consulta, no reconstruidos como en
+  // /price -- ver la aclaración de honestidad del sparkline más abajo)
+  // solo vienen presentes cuando esta card salió de /discover/trending.
+  let priceRowHtml = '';
+  const priceParts = [];
+  const vol = fmtUsd(m.volume_24h);
+  if (vol) priceParts.push(`<span class="metric-label">Vol 24h: <b>${vol}</b></span>`);
+  if (m.source === 'polymarket' && (m.outcomes || []).some(o => o.price !== undefined && o.price !== null)) {
+    (m.outcomes || []).forEach(o => {
+      if (o.price !== undefined && o.price !== null) {
+        priceParts.push(`<span class="metric-label">${escapeHtml(o.label || '')}: <b>${parseFloat(o.price).toFixed(2)}</b></span>`);
+      }
+    });
+  } else if (m.source === 'kalshi' && (m.yes_bid !== undefined && m.yes_bid !== null)) {
+    priceParts.push(`<span class="metric-label">Yes bid/ask: <b>${m.yes_bid}¢ / ${m.yes_ask ?? '—'}¢</b></span>`);
+  }
+  if (priceParts.length) priceRowHtml = `<div class="price-row">${priceParts.join('')}</div>`;
+
+  return `
+    <div class="discover-card">
+      <div>
+        <span class="badge ${badgeClass}">${escapeHtml(m.source)}</span>
+        <div class="title" style="margin-top:6px;">${escapeHtml(m.title || m.market_id || '(sin título)')}</div>
+        <div class="metric-label mono">${escapeHtml(m.market_id || '')}</div>
+        ${priceRowHtml}
+      </div>
+      <div id="discover-action-${i}">${actionHtml}</div>
+    </div>
+  `;
+}
+
+function wireDiscoverCard(m, i) {
+  if (m.source === 'polymarket') {
+    (m.outcomes || []).filter(o => o.token_id).forEach((o, oi) => {
+      const btn = document.getElementById(`add-${i}-${oi}`);
+      if (btn) btn.addEventListener('click', () => trackMarket({
+        source: 'polymarket', title: m.title, outcome_label: o.label, polymarket_token_ids: [o.token_id],
+      }, btn));
+    });
+  } else {
+    const btn = document.getElementById(`add-${i}-0`);
+    if (btn) btn.addEventListener('click', () => trackMarket({
+      source: 'kalshi', title: m.title, kalshi_ticker: m.market_id,
+    }, btn));
+  }
+}
+
+async function trackMarket(payload, btn) {
+  btn.disabled = true;
+  const originalText = btn.textContent;
+  btn.textContent = 'Agregando…';
+  try {
+    const res = await fetch('/discover/track', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.detail || `${res.status} agregando el mercado`);
+    btn.textContent = body.already_tracked ? 'Ya trackeado' : '✓ Agregado';
+    document.getElementById('discover-status').textContent =
+      (body.note || 'Agregado.') + (body.already_tracked ? '' : ' (Puedes presionar "Reiniciar ingesta" aquí al lado para que empiece a recibir datos.)');
+    if (!body.already_tracked) {
+      document.getElementById('restart-ingestion-btn-discover').style.display = '';
+    }
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = originalText;
+    showGlobalError(e.message);
+  }
+}
+
+async function untrackMarket(m, btn) {
+  // Confirmación en dos clicks (nada de confirm() nativo, corta la
+  // interacción con la página) -- el primer click solo cambia el botón a
+  // modo "confirmar", el segundo click (o tocar cualquier otro lado, ver
+  // el timeout) recién dispara el borrado.
+  if (!btn.classList.contains('confirm')) {
+    btn.classList.add('confirm');
+    btn.textContent = '¿Seguro?';
+    btn.title = 'Click de nuevo para borrar el historial de este mercado';
+    if (btn._confirmTimeout) clearTimeout(btn._confirmTimeout);
+    btn._confirmTimeout = setTimeout(() => {
+      btn.classList.remove('confirm');
+      btn.textContent = '🗑';
+      btn.title = 'Eliminar del dashboard';
+    }, 3000);
+    return;
+  }
+
+  clearTimeout(btn._confirmTimeout);
+  btn.disabled = true;
+  btn.textContent = '…';
+  const payload = m.source === 'polymarket'
+    ? { source: 'polymarket', outcome_id: m.outcome_id }
+    : { source: 'kalshi', market_id: m.market_id };
+
+  try {
+    const res = await fetch('/discover/untrack', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.detail || `${res.status} eliminando el mercado`);
+
+    // Para Kalshi se borran los dos lados (yes/no) de ese ticker de una --
+    // sacamos del array en memoria todo lo que comparta ese market_id, no
+    // solo la fila que se clickeó.
+    allMarkets = m.source === 'polymarket'
+      ? allMarkets.filter(x => x.outcome_id !== m.outcome_id)
+      : allMarkets.filter(x => x.market_id !== m.market_id);
+    if (selectedOutcomeId === m.outcome_id || (m.source === 'kalshi' && (selectedOutcomeId || '').startsWith(m.market_id + ':'))) {
+      selectedOutcomeId = allMarkets.length ? allMarkets[0].outcome_id : null;
+      document.getElementById('market-detail').innerHTML = '<div class="empty-state">Elige un mercado de la lista para ver su precio.</div>';
+      if (selectedOutcomeId) loadMarketDetail(selectedOutcomeId);
+    }
+    renderMarketsTable();
+    document.getElementById('discover-status').textContent = body.note || 'Mercado eliminado.';
+    if (body.removed_from_config) {
+      document.getElementById('restart-ingestion-btn-discover').style.display = '';
+    }
+  } catch (e) {
+    btn.disabled = false;
+    btn.classList.remove('confirm');
+    btn.textContent = '🗑';
+    showGlobalError(e.message);
+  }
+}
+
+// -------- Resolver nombres faltantes (mercados trackeados sin título guardado) --------
+
+async function resolveMissingLabels() {
+  const btn = document.getElementById('resolve-labels-btn');
+  const statusEl = document.getElementById('resolve-labels-status');
+  btn.disabled = true;
+  const originalText = btn.textContent;
+  btn.textContent = 'Resolviendo…';
+  statusEl.textContent = 'Buscando nombres para los mercados trackeados que todavía no tienen uno guardado…';
+  try {
+    const res = await fetch('/discover/resolve_missing_labels', { method: 'POST' });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.detail || `${res.status} resolviendo nombres`);
+    statusEl.textContent = body.note || 'Listo.';
+    if ((body.resolved || []).length) {
+      await loadMarkets();  // recargar la tabla para que se vean los nombres nuevos
+    }
+  } catch (e) {
+    statusEl.textContent = `No se pudo completar: ${e.message}`;
+    showGlobalError(e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalText;
+  }
+}
+
+// -------- Sugerencias de mercados espejo (posible arbitraje) --------
+
+function mirrorCandidateCardHtml(c, i) {
+  const hasSpread = c.price_spread !== null && c.price_spread !== undefined;
+  const spreadPct = hasSpread ? (c.price_spread * 100).toFixed(1) + ' pts' : 'n/d';
+  // >15 puntos ya amerita mirar dos veces aunque haya pasado el filtro del
+  // backend (que puede venir desactivado, o con un umbral más laxo que el
+  // default) -- naranja como aviso visual, no un bloqueo.
+  const spreadColor = hasSpread && c.price_spread > 0.15 ? 'var(--status-warning, #b45309)' : 'var(--text-secondary)';
+  const polyPrice = c.polymarket_yes_price !== null && c.polymarket_yes_price !== undefined
+    ? (c.polymarket_yes_price * 100).toFixed(1) + '¢' : 'n/d';
+  const kalshiPrice = c.kalshi_yes_price !== null && c.kalshi_yes_price !== undefined
+    ? (c.kalshi_yes_price * 100).toFixed(1) + '¢' : 'n/d';
+  const invertedNote = c.kalshi_inverted
+    ? `<div style="font-size:11px; color:var(--status-warning, #b45309); margin-top:6px;">⚠️ Orientación invertida: el "Yes" de Polymarket corresponde al "No" de Kalshi (y viceversa) — ya se guarda así al confirmar.</div>`
+    : '';
+  // semantic_flags -- señales de relación entre las preguntas más allá
+  // del texto crudo (montos/umbrales, dirección sube/baja), ver
+  // generate_candidates en tools/market_matcher.py. Las que empiezan con
+  // "Coincide" ya se reflejan como puntos sumados en combined_score, así
+  // que van en verde; el resto ya restó puntos, van en naranja.
+  const flagsHtml = (c.semantic_flags || []).map(f => {
+    const isGood = f.startsWith('Coincide');
+    const color = isGood ? 'var(--diverging-pos, #15803d)' : 'var(--status-warning, #b45309)';
+    const icon = isGood ? '✓' : '⚠️';
+    return `<div style="font-size:11px; color:${color}; margin-top:4px;">${icon} ${escapeHtml(f)}</div>`;
+  }).join('');
+  // arbitrage_detail -- instrucción concreta de qué comprar en cada
+  // plataforma cuando el margen teórico supera ARBITRAGE_MIN_MARGIN (ver
+  // generate_candidates en tools/market_matcher.py). Es teórico (antes de
+  // fees/slippage) y asume que de verdad es el MISMO evento en las dos
+  // plataformas -- si hay banderas de advertencia abajo (no solo
+  // "Coincide"), puede que sea la fila "simplemente relacionados" de la
+  // tabla, no arbitraje real, así que se avisa aparte en ese caso.
+  const hasWarningFlags = (c.semantic_flags || []).some(f => !f.startsWith('Coincide'));
+  const arbColor = hasWarningFlags ? 'var(--status-warning, #b45309)' : 'var(--diverging-pos, #15803d)';
+  const arbitrageHtml = c.arbitrage_detail
+    ? `<div style="margin-top:8px; padding:8px; border-radius:6px; border:1px solid ${arbColor};">
+         <div style="font-weight:700; font-size:12px; color:${arbColor};">💰 Posible arbitraje -- margen ${(c.arbitrage_margin * 100).toFixed(1)} pts</div>
+         <div style="font-size:11px; margin-top:2px;">${escapeHtml(c.arbitrage_detail)}</div>
+         ${hasWarningFlags ? `<div style="font-size:11px; margin-top:4px; color:${arbColor};">⚠️ Hay banderas abajo que dudan que sea el mismo evento -- confirma eso antes de asumir que es arbitraje real, no basta con comparar precios.</div>` : ''}
+       </div>`
+    : '';
+  // combined_score = 0.45×texto + 0.55×precio (ver generate_candidates en
+  // tools/market_matcher.py) -- cuando no hay precio de algún lado, es
+  // solo el score de texto, marcado con "(sin verificar por precio)" para
+  // no confundirlo con uno sí respaldado por ambas señales.
+  const hasPriceScore = c.price_score !== null && c.price_score !== undefined;
+  const combinedLabel = hasPriceScore
+    ? `match: ${escapeHtml(String(c.combined_score))}/100`
+    : `match: ${escapeHtml(String(c.combined_score))}/100 (sin verificar por precio)`;
+  const combinedColor = c.combined_score >= 70 ? 'var(--diverging-pos, #15803d)'
+    : c.combined_score >= 45 ? 'var(--text-secondary)' : 'var(--status-warning, #b45309)';
+
+  return `
+    <div class="discover-card">
+      <div>
+        <span class="badge badge-poly">polymarket</span> <span style="margin:0 4px; color:var(--text-muted);">↔</span> <span class="badge badge-kalshi">kalshi</span>
+        <span class="example-tag" style="margin-left:8px; color:${combinedColor}; border-color:${combinedColor}; font-weight:700;">${combinedLabel}</span>
+        <span class="example-tag" style="margin-left:6px;">texto ${escapeHtml(String(c.score))}/100</span>
+        <span class="example-tag" style="margin-left:6px; color:${spreadColor}; border-color:${spreadColor};">spread precio: ${escapeHtml(spreadPct)}</span>
+        <div class="title" style="margin-top:6px;">${escapeHtml(c.polymarket_title)}</div>
+        <div class="metric-label mono">${escapeHtml(c.polymarket_condition_id)} · vol 24h ${escapeHtml(String(c.polymarket_volume_24h ?? 'n/d'))} · Yes ≈ ${escapeHtml(polyPrice)}</div>
+        <div class="title" style="margin-top:6px;">${escapeHtml(c.kalshi_title)}</div>
+        <div class="metric-label mono">${escapeHtml(c.kalshi_ticker)} · vol 24h ${escapeHtml(String(c.kalshi_volume_24h ?? 'n/d'))} · Yes ≈ ${escapeHtml(kalshiPrice)}</div>
+        ${invertedNote}
+        ${flagsHtml}
+        ${arbitrageHtml}
+      </div>
+      <div id="mirror-action-${i}">
+        <button class="add-btn" id="mirror-confirm-${i}">Confirmar par</button>
+      </div>
+    </div>
+  `;
+}
+
+async function searchMirrorCandidates() {
+  const btn = document.getElementById('mirror-search-btn');
+  const statusEl = document.getElementById('mirror-status');
+  const resultsEl = document.getElementById('mirror-candidates');
+  const emptyEl = document.getElementById('mirror-empty');
+  const minScore = document.getElementById('mirror-min-score').value || '45';
+  const minVolume = document.getElementById('mirror-min-volume').value;
+  const maxPriceSpread = document.getElementById('mirror-max-price-spread').value;
+  const keywords = document.getElementById('mirror-keywords').value.trim();
+
+  btn.disabled = true;
+  const originalText = btn.textContent;
+  btn.textContent = 'Buscando…';
+  statusEl.textContent = keywords
+    ? `Buscando mercados de "${keywords}" en Polymarket y Kalshi para comparar — puede tardar un rato…`
+    : 'Comparando los mercados con más volumen de Polymarket y Kalshi (sin palabra clave, puede no encontrar mucho) — puede tardar unos segundos…';
+  resultsEl.innerHTML = '';
+  emptyEl.style.display = 'none';
+
+  try {
+    const params = new URLSearchParams({ min_score: minScore });
+    if (minVolume) params.set('min_volume', minVolume);
+    if (maxPriceSpread !== '') params.set('max_price_spread', maxPriceSpread);
+    if (keywords) params.set('q', keywords);
+    const res = await fetch(`/discover/mirror_candidates?${params}`);
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.detail || `${res.status} buscando candidatos`);
+
+    statusEl.textContent = body.note || '';
+    if (!body.candidates || !body.candidates.length) {
+      emptyEl.textContent = 'No se encontraron candidatos con ese score mínimo — prueba bajar el umbral.';
+      emptyEl.style.display = '';
+      return;
+    }
+    resultsEl.innerHTML = body.candidates.map((c, i) => mirrorCandidateCardHtml(c, i)).join('');
+    body.candidates.forEach((c, i) => {
+      const confirmBtn = document.getElementById(`mirror-confirm-${i}`);
+      if (confirmBtn) confirmBtn.addEventListener('click', () => confirmMirror(c, confirmBtn));
+    });
+  } catch (e) {
+    statusEl.textContent = `No se pudo completar: ${e.message}`;
+    showGlobalError(e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalText;
+  }
+}
+
+async function confirmMirror(c, btn) {
+  btn.disabled = true;
+  const originalText = btn.textContent;
+  btn.textContent = 'Confirmando…';
+  try {
+    const res = await fetch('/discover/confirm_mirror', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        polymarket_condition_id: c.polymarket_condition_id,
+        polymarket_token_ids: c.polymarket_token_ids,
+        polymarket_outcomes: c.polymarket_outcomes,
+        polymarket_title: c.polymarket_title,
+        kalshi_ticker: c.kalshi_ticker,
+        kalshi_title: c.kalshi_title,
+        score: c.score,
+        combined_score: c.combined_score,
+        kalshi_inverted: !!c.kalshi_inverted,
+      }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.detail || `${res.status} confirmando el par`);
+    btn.textContent = '✓ Confirmado';
+    document.getElementById('mirror-status').textContent =
+      (body.note || 'Par confirmado.') + ' Recargá "Mercados trackeados" y "Spread" luego de reiniciar la ingesta.';
+    document.getElementById('restart-ingestion-btn-discover').style.display = '';
+    await Promise.all([loadMarkets(), loadSpread()]);
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = originalText;
+    showGlobalError(e.message);
+  }
+}
+
+// -------- Reiniciar ingesta (para que tome mercados agregados desde el buscador) --------
+
+async function restartIngestion(btn, statusEl) {
+  const originalText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Reiniciando…';
+  if (statusEl) statusEl.textContent = 'Reiniciando el contenedor de ingesta — el feed en vivo se corta por unos segundos…';
+  try {
+    const res = await fetch('/system/restart_ingestion', { method: 'POST' });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.detail || `${res.status} reiniciando la ingesta`);
+    if (statusEl) statusEl.textContent = `✓ Ingesta reiniciada (${body.container}). Puede tardar unos segundos en reconectar.`;
+    btn.textContent = '✓ Reiniciada';
+    setTimeout(() => { btn.textContent = originalText; btn.disabled = false; }, 4000);
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = originalText;
+    if (statusEl) statusEl.textContent = `No se pudo completar: ${e.message}`;
+    showGlobalError(e.message);
+  }
+}
+
+// ---------------------- TAB 2: CUENTAS ----------------------
+
+function fmtUsdFull(v) {
+  if (v === null || v === undefined) return '—';
+  const n = parseFloat(v);
+  if (isNaN(n)) return '—';
+  return n.toLocaleString('es-AR', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 });
+}
+
+function pnlSpan(v) {
+  if (v === null || v === undefined) return '—';
+  const n = parseFloat(v);
+  if (isNaN(n)) return '—';
+  const cls = n > 0 ? 'pnl-pos' : (n < 0 ? 'pnl-neg' : '');
+  const sign = n > 0 ? '+' : '';
+  return `<span class="${cls}">${sign}${fmtUsdFull(n)}</span>`;
+}
+
+function fillAccountCard(prefix, summary) {
+  document.getElementById(`${prefix}-balance`).textContent = fmtUsdFull(summary.balance_dollars);
+  document.getElementById(`${prefix}-portfolio-value`).textContent = fmtUsdFull(summary.portfolio_value_dollars);
+  document.getElementById(`${prefix}-exposure`).textContent = fmtUsdFull(summary.total_exposure_dollars);
+  document.getElementById(`${prefix}-open-count`).textContent = `${summary.open_positions_count ?? 0} posiciones abiertas`;
+
+  const settled = summary.settled || {};
+  document.getElementById(`${prefix}-cum-pnl`).innerHTML = pnlSpan(settled.cumulative_pnl_dollars);
+  document.getElementById(`${prefix}-settled-count`).textContent = `${settled.count ?? 0} mercados liquidados`;
+
+  document.getElementById(`${prefix}-winrate`).textContent =
+    settled.win_rate !== null && settled.win_rate !== undefined ? `${Math.round(settled.win_rate * 100)}%` : '—';
+  document.getElementById(`${prefix}-wl-count`).textContent =
+    `${settled.win_count ?? 0} ganados / ${settled.loss_count ?? 0} perdidos`;
+
+  document.getElementById(`${prefix}-best-worst`).innerHTML =
+    settled.best_pnl_dollars !== null && settled.best_pnl_dollars !== undefined
+      ? `Mejor: ${pnlSpan(settled.best_pnl_dollars)} &nbsp;·&nbsp; Peor: ${pnlSpan(settled.worst_pnl_dollars)}`
+      : '—';
+}
+
+let lastPnlPoints = { kalshi: [], polymarket: [] };
+
+function renderPnlChart() {
+  const container = document.getElementById('pnl-chart-container');
+  const kPts = lastPnlPoints.kalshi || [];
+  if (kPts.length < 2) {
+    container.innerHTML = '<div class="empty-state">Todavía no hay suficientes mercados liquidados en Kalshi para graficar la evolución.</div>';
+    return;
+  }
+  const W = 760, H = 220, PAD = 30;
+  const allVals = kPts.map(p => p.cumulative_pnl_dollars);
+  const min = Math.min(0, ...allVals), max = Math.max(0, ...allVals);
+  const range = (max - min) || 1;
+  const x = i => PAD + (i / (kPts.length - 1)) * (W - 2 * PAD);
+  const y = v => H - PAD - ((v - min) / range) * (H - 2 * PAD);
+  const zeroY = y(0);
+
+  const path = kPts.map((p, i) => `${i === 0 ? 'M' : 'L'} ${x(i).toFixed(1)} ${y(p.cumulative_pnl_dollars).toFixed(1)}`).join(' ');
+  const lastVal = kPts[kPts.length - 1].cumulative_pnl_dollars;
+  const lineColor = lastVal >= 0 ? 'var(--diverging-pos)' : 'var(--diverging-neg)';
+
+  container.innerHTML = `
+    <svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" role="img" aria-label="Evolución de P&amp;L acumulado de Kalshi">
+      <line x1="${PAD}" y1="${zeroY.toFixed(1)}" x2="${W - PAD}" y2="${zeroY.toFixed(1)}" stroke="var(--baseline)" stroke-width="1" stroke-dasharray="3,3"/>
+      <path d="${path}" fill="none" stroke="${lineColor}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      <circle cx="${x(kPts.length - 1).toFixed(1)}" cy="${y(lastVal).toFixed(1)}" r="3.5" fill="${lineColor}">
+        <title>${escapeHtml(kPts[kPts.length - 1].date)}: ${fmtUsdFull(lastVal)}</title>
+      </circle>
+      <text x="${PAD}" y="14" font-size="11" fill="var(--text-muted)">${escapeHtml(kPts[0].date)}</text>
+      <text x="${W - PAD}" y="14" font-size="11" fill="var(--text-muted)" text-anchor="end">${escapeHtml(kPts[kPts.length - 1].date)}</text>
+    </svg>
+    <div class="sparkline-caption">P&amp;L acumulado real de Kalshi por día de liquidación (${kPts.length} días con liquidaciones). Polymarket queda fuera del gráfico hasta que haya una cuenta conectada.</div>
+  `;
+}
+
+async function loadAccountsTab() {
+  const [kSummary, kFills, kPnl, pSummary] = await Promise.all([
+    fetchJson('/portfolio/kalshi/summary'),
+    fetchJson('/portfolio/kalshi/fills?limit=50'),
+    fetchJson('/portfolio/kalshi/pnl_evolution'),
+    fetchJson('/portfolio/polymarket/summary'),
+  ]);
+
+  const kNotConnected = document.getElementById('kalshi-not-connected');
+  const kWrap = document.getElementById('kalshi-connected-wrap');
+  if (kSummary.connected) {
+    kNotConnected.style.display = 'none';
+    kWrap.style.display = 'block';
+    fillAccountCard('kalshi', kSummary);
+  } else {
+    kWrap.style.display = 'none';
+    kNotConnected.style.display = 'block';
+    kNotConnected.textContent = kSummary.reason === 'not_configured'
+      ? `Cuenta Kalshi no configurada todavía: ${kSummary.error || 'faltan credenciales en .env'}`
+      : `No se pudo consultar Kalshi ahora mismo: ${kSummary.error || 'error desconocido'}`;
+  }
+
+  document.getElementById('poly-note').textContent =
+    pSummary.note || 'Polymarket no tiene cuenta conectada -- estos valores son un ejemplo de cómo se va a ver el panel.';
+  fillAccountCard('poly', pSummary);
+
+  lastPnlPoints.kalshi = kPnl.connected ? (kPnl.points || []) : [];
+  renderPnlChart();
+
+  const fills = kFills.connected ? (kFills.fills || []) : [];
+  const fillsTbody = document.getElementById('fills-tbody');
+  document.getElementById('fills-empty').style.display = fills.length ? 'none' : 'block';
+  fillsTbody.innerHTML = fills.map(f => `
+    <tr>
+      <td>${fmtRelative(f.created_time)}</td>
+      <td class="mono">${escapeHtml(f.ticker || '—')}</td>
+      <td>${escapeHtml(f.outcome_side || '—')} / ${escapeHtml(f.book_side || '—')}</td>
+      <td>${f.count ?? '—'}</td>
+      <td>${f.price_dollars !== undefined && f.price_dollars !== null ? fmtUsdFull(f.price_dollars) : '—'}</td>
+      <td>${f.fee_cost_dollars !== undefined && f.fee_cost_dollars !== null ? fmtUsdFull(f.fee_cost_dollars) : '—'}</td>
+      <td>${f.is_taker === true ? 'Sí' : (f.is_taker === false ? 'No' : '—')}</td>
+    </tr>
+  `).join('');
+}
+
+// ---------------------- TAB 2: BACKOFFICE ----------------------
+
+function statusPill(status, extra = '') {
+  const label = { good: 'OK', warning: 'Atención', critical: 'Crítico' }[status] || status;
+  return `<span class="status-pill status-${status}"><span class="status-dot"></span>${label}</span>${extra}`;
+}
+
+async function loadSystemStatus() {
+  const data = await fetchJson('/system/status');
+
+  const banner = document.getElementById('overall-banner');
+  const overallColor = { good: 'var(--status-good)', warning: 'var(--status-warning)', critical: 'var(--status-critical)' }[data.overall];
+  banner.style.background = overallColor;
+  banner.style.color = data.overall === 'warning' ? '#3a2c00' : '#fff';
+  const overallLabel = { good: 'Todo en verde', warning: 'Atención en al menos un componente', critical: 'Hay componentes críticos' }[data.overall];
+  banner.textContent = `${overallLabel} · chequeado ${fmtRelative(data.checked_at)}`;
+
+  const db = data.timescaledb || {};
+  document.getElementById('status-timescaledb').innerHTML = `
+    ${statusPill(db.status)}
+    <div style="margin-top:8px;" class="metric-label">${db.latency_ms !== undefined ? db.latency_ms + ' ms' : (db.error ? escapeHtml(db.error) : '—')}</div>
+  `;
+
+  const mn = data.minio || {};
+  document.getElementById('status-minio').innerHTML = `
+    ${statusPill(mn.status)}
+    <div style="margin-top:8px;" class="metric-label">${mn.latency_ms !== undefined ? mn.latency_ms + ' ms · bucket ' + (mn.bucket_exists ? 'existe' : 'no existe') : (mn.error ? escapeHtml(mn.error) : '—')}</div>
+  `;
+
+  for (const src of ['polymarket', 'kalshi']) {
+    const s = data[src] || {};
+    document.getElementById(`status-${src}`).innerHTML = `
+      ${statusPill(s.status)}
+      <div style="margin-top:8px;" class="metric-label">
+        ${s.last_seen ? 'Último evento: ' + fmtRelative(s.last_seen) : 'Sin eventos todavía'}
+      </div>
+    `;
+  }
+}
+
+async function loadGaps() {
+  const data = await fetchJson('/system/gaps?limit=50');
+  const gaps = data.gaps || [];
+  const tbody = document.getElementById('gaps-tbody');
+  document.getElementById('gaps-empty').style.display = gaps.length ? 'none' : 'block';
+  tbody.innerHTML = gaps.map(g => `
+    <tr>
+      <td><span class="badge ${g.source === 'polymarket' ? 'badge-poly' : 'badge-kalshi'}">${escapeHtml(g.source || '')}</span></td>
+      <td>${escapeHtml(g.gap_type || '')}</td>
+      <td>${fmtRelative(g.start)}</td>
+      <td>${g.duration_seconds !== null && g.duration_seconds !== undefined ? g.duration_seconds.toFixed(1) + 's' : '—'}</td>
+      <td class="mono" style="max-width:320px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${escapeHtml(g.detail || '')}">${escapeHtml(g.detail || '')}</td>
+    </tr>
+  `).join('');
+}
+
+// ---------------------- ORQUESTACIÓN ----------------------
+
+async function refreshCurrentTab() {
+  try {
+    if (currentTab === 'trading') {
+      await Promise.all([loadMarkets(), loadSpread()]);
+    } else if (currentTab === 'accounts') {
+      await loadAccountsTab();
+    } else {
+      await Promise.all([loadSystemStatus(), loadGaps()]);
+    }
+    clearGlobalError();
+    document.getElementById('last-refreshed').textContent = `Actualizado ${fmtRelative(new Date().toISOString())}`;
+  } catch (e) {
+    showGlobalError(e.message);
+  }
+}
+
+function switchTab(tab) {
+  currentTab = tab;
+  document.getElementById('page-trading').classList.toggle('active', tab === 'trading');
+  document.getElementById('page-accounts').classList.toggle('active', tab === 'accounts');
+  document.getElementById('page-backoffice').classList.toggle('active', tab === 'backoffice');
+  document.getElementById('tab-btn-trading').classList.toggle('active', tab === 'trading');
+  document.getElementById('tab-btn-accounts').classList.toggle('active', tab === 'accounts');
+  document.getElementById('tab-btn-backoffice').classList.toggle('active', tab === 'backoffice');
+  restartAutoRefresh();
+  refreshCurrentTab();
+}
+
+function restartAutoRefresh() {
+  if (refreshTimer) clearInterval(refreshTimer);
+  const ms = currentTab === 'trading' ? REFRESH_MS_TRADING : (currentTab === 'accounts' ? REFRESH_MS_ACCOUNTS : REFRESH_MS_BACKOFFICE);
+  refreshTimer = setInterval(refreshCurrentTab, ms);
+}
+
+document.getElementById('tab-btn-trading').addEventListener('click', () => switchTab('trading'));
+document.getElementById('tab-btn-accounts').addEventListener('click', () => switchTab('accounts'));
+document.getElementById('tab-btn-backoffice').addEventListener('click', () => switchTab('backoffice'));
+document.getElementById('refresh-btn').addEventListener('click', refreshCurrentTab);
+document.getElementById('market-search').addEventListener('input', renderMarketsTable);
+document.getElementById('resolve-labels-btn').addEventListener('click', resolveMissingLabels);
+document.getElementById('mirror-search-btn').addEventListener('click', searchMirrorCandidates);
+document.getElementById('discover-btn').addEventListener('click', runDiscoverSearch);
+document.getElementById('trending-btn').addEventListener('click', runTrendingSearch);
+document.getElementById('live-btn').addEventListener('click', runLiveSearch);
+document.getElementById('discover-search').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') runDiscoverSearch();
+});
+document.getElementById('restart-ingestion-btn-discover').addEventListener('click', () =>
+  restartIngestion(document.getElementById('restart-ingestion-btn-discover'), document.getElementById('discover-status'))
+);
+document.getElementById('restart-ingestion-btn-bo').addEventListener('click', () =>
+  restartIngestion(document.getElementById('restart-ingestion-btn-bo'), document.getElementById('restart-ingestion-status-bo'))
+);
+
+async function loadDiscoverCategories() {
+  try {
+    const data = await fetchJson('/discover/categories');
+    const select = document.getElementById('discover-category');
+    (data.categories || []).forEach(cat => {
+      const opt = document.createElement('option');
+      opt.value = cat;
+      opt.textContent = cat;
+      select.appendChild(opt);
+    });
+  } catch (e) {
+    // No es crítico -- el buscador por texto libre sigue andando igual
+    // aunque no se puedan cargar las categorías.
+  }
+}
+loadDiscoverCategories();
+
+restartAutoRefresh();
+refreshCurrentTab();
+</script>
+
+</body>
+</html>

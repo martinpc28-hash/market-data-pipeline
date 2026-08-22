@@ -1,0 +1,15 @@
+# Nunca subir credenciales
+.env
+secrets/
+*.pem
+*.key
+
+# Datos capturados (pueden pesar mucho, no van al repo)
+data/
+logs/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/

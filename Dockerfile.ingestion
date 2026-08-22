@@ -1,0 +1,29 @@
+# Fase 6 — Imagen para el proceso de ingesta (ingestion/run_resilient_feed.py).
+#
+# Importante: la clave privada de Kalshi (secrets/kalshi_private_key.pem)
+# y el .env NUNCA se copian a la imagen -- se montan como volumen en
+# tiempo de ejecución (ver docker-compose.yml). Una imagen con un secreto
+# horneado adentro queda en el historial de capas de Docker para siempre,
+# incluso si después se borra el archivo -- el volumen es la única forma
+# correcta de pasar esto.
+
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# Capa de dependencias separada del código: así "docker compose build" no
+# reinstala todo cada vez que cambia una línea de Python, solo cuando
+# cambia requirements.txt.
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY common/ common/
+COPY storage/ storage/
+COPY config/ config/
+COPY ingestion/ ingestion/
+
+# data/ y logs/ los crea el propio proceso al arrancar (ver _today_path en
+# run_dual_feed.py), pero docker-compose los monta como volumen igual para
+# que sobrevivan a un `docker compose down` sin -v.
+
+CMD ["python", "ingestion/run_resilient_feed.py"]

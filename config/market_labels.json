@@ -1,0 +1,29 @@
+{
+  "_comentario": "Nombres legibles para los outcome_id/ticker que el pipeline trackea -- sin esto, la tabla de 'Mercados trackeados' del dashboard solo tiene el condition_id/token_id/ticker crudo (hex o número larguísimo), imposible de reconocer a simple vista. Se completa SOLO -- automáticamente -- cuando agregás un mercado nuevo vía el buscador (POST /discover/track, que ya conoce el título porque lo mostró en la card). Los defaults hardcodeados en ingestion/run_dual_feed.py y los agregados a mano antes de que existiera este archivo se sembraron acá manualmente (ver comentarios abajo); si en algún momento agregás un mercado por otra vía (editando tracked_markets.json a mano, por ejemplo), no va a tener nombre acá y el dashboard va a volver a mostrar el ID crudo -- limitación consciente, no vale la pena automatizar una resolución en vivo dentro del polling de /markets.",
+  "polymarket": {
+    "30446115040994756735976163960167805883187697808359254957130669387440187908610": {
+      "title": "¿Feijóo será el próximo Primer Ministro de España?",
+      "outcome": "Yes"
+    },
+    "102959860025519533768586392648393292830655850541879057833605543601433003729221": {
+      "title": "¿Feijóo será el próximo Primer Ministro de España?",
+      "outcome": "No"
+    },
+    "11171618905857319805355893398009978356002287408842633593535559412449299952250": {
+      "title": "Will Marco Rubio win the 2028 US Presidential Election?",
+      "outcome": "Yes"
+    },
+    "65892530750232246342273648992064742042382898919201083513241874070914353628268": {
+      "title": "Will Marco Rubio win the 2028 US Presidential Election?",
+      "outcome": "No"
+    }
+  },
+  "kalshi": {
+    "KXSPANISHPM-27AUG22-AFEI": {
+      "title": "¿Feijóo será el próximo Primer Ministro de España?"
+    },
+    "KXPRESPERSON-28-MRUB": {
+      "title": "Who will win the next presidential election? — Marco Rubio"
+    }
+  }
+}

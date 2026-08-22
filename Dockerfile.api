@@ -1,0 +1,20 @@
+# Fase 6 — Imagen para la API de consumo (api/main.py, FastAPI + uvicorn).
+
+FROM python:3.12-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY common/ common/
+COPY storage/ storage/
+COPY config/ config/
+COPY api/ api/
+# tools/market_matcher.py -- reutilizado por /discover/markets (Fase 7,
+# buscador del dashboard) para hablar con las APIs REST de Polymarket/Kalshi.
+COPY tools/ tools/
+
+EXPOSE 8000
+
+CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]

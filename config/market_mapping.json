@@ -1,0 +1,28 @@
+{
+  "_comentario": "Paso 6 del roadmap: mercados equivalentes entre plataformas (mismo evento, distinta plataforma). No hay forma confiable de emparejar esto automáticamente por título -- Polymarket y Kalshi describen el mismo evento con textos distintos -- así que esta tabla se mantiene a mano. Cada entrada agrupa los outcome_id normalizados (ver common/schema.py) de ambas plataformas que representan el mismo resultado, para poder comparar precios/spread en la Fase 5.",
+  "_como_completar": "1) Buscá el mismo evento en polymarket.com y kalshi.com. 2) Sacá el asset_id de Polymarket (gamma-api.polymarket.com/markets, campo clobTokenIds -- el orden del array corresponde al array 'outcomes', normalmente [Yes, No]). 3) Sacá el market_ticker de Kalshi (GET https://api.elections.kalshi.com/trade-api/v2/markets). 4) Agregá una entrada acá abajo.",
+  "pares": [
+    {
+      "descripcion": "Decisión de tasas de la Fed, reunión de septiembre 2026 -- ¿recorte de 25 puntos base?",
+      "nota": "CORREGIDO el 2026-08-19 -- el mapeo original (verificado_el 2026-08-18) asumía una banda vigente de 3.75-4.00%, pero esa banda ya estaba desactualizada: la Fed la sostuvo en 3.50-3.75% en la reunión de junio 2026 (comunicado oficial: https://www.federalreserve.gov/newsevents/pressreleases/monetary20260617a.htm). Con la banda vieja, el ticker usado (KXFED-26SEP-T3.75) daba un spread de ~69 puntos porcentuales contra Polymarket -- ahí se detectó el error, no antes, porque el número no cerraba. No es un match 1:1 exacto de esquema: Polymarket tiene un mercado Sí/No directo ('¿recorta 25bps?'). Kalshi publica una escalera de mercados de umbral ('¿la tasa termina por encima de X%?'), uno por nivel. Con la banda REAL (3.50-3.75%), un recorte de 25bps la llevaría a 3.25-3.50%, así que el umbral equivalente es 3.50%, no 3.75%. Confirmado con precios en vivo: KXFED-26SEP-T3.50 'No' cotiza $0.00-0.02, contra ~0.8% de Polymarket -- ahora sí coinciden. Esta equivalencia vuelve a depender de que la banda actual (3.50-3.75%) no cambie antes de la reunión de septiembre; si la Fed se mueve en alguna reunión intermedia, hay que re-verificar de nuevo (es la misma advertencia que ya tenía la versión anterior, y sigue siendo cierta).",
+      "polymarket_market_id": "0xac02cbb049e46d6a3627c0fdf52fa554982a9025d45968207b362acb6ca4b830",
+      "polymarket_outcome_id_yes_recorta": "57748138085022719760345772310040703848567377822400132842014290209986511882046",
+      "polymarket_outcome_id_no_recorta": "28239418772633645184924651434956000849078365566842629564562475378531350731731",
+      "kalshi_market_ticker": "KXFED-26SEP-T3.50",
+      "kalshi_outcome_id_equivalente_a_recorte": "KXFED-26SEP-T3.50:no",
+      "kalshi_outcome_id_equivalente_a_no_recorte": "KXFED-26SEP-T3.50:yes",
+      "verificado_el": "2026-08-19"
+    },
+    {
+      "descripcion": "¿Alberto Núñez Feijóo será el próximo Primer Ministro de España?",
+      "nota": "Match limpio, a diferencia del de la Fed: acá las dos plataformas hacen literalmente la misma pregunta binaria ('¿Feijóo asume como PM?'), no hace falta traducir entre un mercado Sí/No y una escalera de umbrales. Precios al momento de verificar: Polymarket Yes=80.5%, Kalshi Yes bid/ask=77-83% -- coinciden dentro de un rango razonable, buena señal de que el mapeo es correcto (contrasta con el ~69pp de discrepancia que delató el mapeo mal hecho de la Fed). Igual sigue siendo un mercado de resolución lejana (Polymarket resuelve hasta 2028-03-31, Kalshi hasta 2027-08-22 según el ticker) -- revisar si cambia el panorama político español antes de asumir que la equivalencia se mantiene.",
+      "polymarket_market_id": "0x97c0b1316b8d9ba677414e8a682948e7560c1af60fc239b085a68cc467c21f23",
+      "polymarket_outcome_id_yes": "30446115040994756735976163960167805883187697808359254957130669387440187908610",
+      "polymarket_outcome_id_no": "102959860025519533768586392648393292830655850541879057833605543601433003729221",
+      "kalshi_market_ticker": "KXSPANISHPM-27AUG22-AFEI",
+      "kalshi_outcome_id_equivalente_a_si": "KXSPANISHPM-27AUG22-AFEI:yes",
+      "kalshi_outcome_id_equivalente_a_no": "KXSPANISHPM-27AUG22-AFEI:no",
+      "verificado_el": "2026-08-19"
+    }
+  ]
+}

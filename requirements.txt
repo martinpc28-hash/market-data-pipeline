@@ -1,0 +1,10 @@
+websockets>=13.0
+cryptography>=42.0
+python-dotenv>=1.0
+requests>=2.31
+rapidfuzz>=3.0
+asyncpg>=0.29
+minio>=7.2
+fastapi>=0.110
+uvicorn[standard]>=0.29
+docker>=7.0

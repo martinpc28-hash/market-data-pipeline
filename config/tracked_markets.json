@@ -1,0 +1,13 @@
+{
+  "_comentario": "Mercados agregados desde el buscador del dashboard (Fase 7), además de los defaults hardcodeados en ingestion/run_dual_feed.py. Reiniciá la ingesta (docker compose restart ingestion) después de agregar uno para que empiece a trackearlo.",
+  "polymarket_tokens": [
+    "11171618905857319805355893398009978356002287408842633593535559412449299952250",
+    "65892530750232246342273648992064742042382898919201083513241874070914353628268",
+    "57748138085022719760345772310040703848567377822400132842014290209986511882046",
+    "28239418772633645184924651434956000849078365566842629564562475378531350731731"
+  ],
+  "kalshi_tickers": [
+    "KXPRESPERSON-28-MRUB",
+    "KXFED-26SEP-T3.50"
+  ]
+}
