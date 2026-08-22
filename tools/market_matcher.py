@@ -34,6 +34,7 @@ Qué hace la CLI:
 
 import argparse
 import json
+import math
 import re
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -911,26 +912,42 @@ def _extract_numbers(text: str) -> set[float]:
     return result
 
 
+def _numbers_close(x: float, y: float) -> bool:
+    """Considera dos montos "el mismo umbral" con una tolerancia chica,
+    no exigiendo igualdad exacta -- confirmado en la práctica que Kalshi
+    y Polymarket casi nunca escriben el mismo umbral con el mismo número
+    literal: Kalshi arma sus strikes un centavo por debajo del redondo
+    (ej. "$149,999.99") mientras Polymarket lo redondea en el título (ej.
+    "$150,000"). Con igualdad exacta, ESE PAR -- que es el mismo mercado
+    -- quedaba excluido igual que un par realmente distinto (ej. $95,000
+    vs $99,999.99), y no había forma de distinguirlos. Tolerancia: 0.5%
+    relativo o $1 absoluto (lo que sea mayor), suficiente para el ajuste
+    de un centavo de Kalshi pero no para confundir umbrales que en
+    realidad difieren en miles de dólares."""
+    return math.isclose(x, y, rel_tol=0.005, abs_tol=1.0)
+
+
 def _numbers_align(poly_title: str, kalshi_title: str) -> bool | None | str:
-    """True si algún monto/umbral mencionado en un título coincide con
-    alguno del otro. False si ambos títulos mencionan números pero
-    ninguno coincide (señal fuerte de mercado distinto, ej. $100k vs
-    $150k). "asymmetric" cuando SOLO uno de los dos menciona algún
-    número/monto -- a diferencia de la fecha (donde un título sin fecha
-    puntual todavía puede ser "el mismo mercado" sin especificarla), acá
-    si un título habla de un umbral en dólares concreto y el otro no
-    menciona ningún número, es señal fuerte de que son preguntas
-    distintas (confirmado con casos reales del usuario, ej. "Will a new
-    country buy Bitcoin..." sin monto vs "...above $99,999.99") --
-    se trata como filtro duro, no como penalización suave. None solo
-    cuando NINGUNO de los dos menciona ningún número (sin señal en
-    ningún lado, no se puede comparar, no penaliza)."""
+    """True si algún monto/umbral mencionado en un título coincide (con
+    la tolerancia de _numbers_close) con alguno del otro. False si ambos
+    títulos mencionan números pero ninguno coincide ni de cerca (señal
+    fuerte de mercado distinto, ej. $100k vs $150k). "asymmetric" cuando
+    SOLO uno de los dos menciona algún número/monto -- a diferencia de
+    la fecha (donde un título sin fecha puntual todavía puede ser "el
+    mismo mercado" sin especificarla), acá si un título habla de un
+    umbral en dólares concreto y el otro no menciona ningún número, es
+    señal fuerte de que son preguntas distintas (confirmado con casos
+    reales del usuario, ej. "Will a new country buy Bitcoin..." sin
+    monto vs "...above $99,999.99") -- se trata como filtro duro, no
+    como penalización suave. None solo cuando NINGUNO de los dos
+    menciona ningún número (sin señal en ningún lado, no se puede
+    comparar, no penaliza)."""
     a, b = _extract_numbers(poly_title), _extract_numbers(kalshi_title)
     if not a and not b:
         return None
     if bool(a) != bool(b):
         return "asymmetric"
-    return not a.isdisjoint(b)
+    return any(_numbers_close(x, y) for x in a for y in b)
 
 
 # Pares de dirección semántica opuesta -- si un título usa una palabra de
