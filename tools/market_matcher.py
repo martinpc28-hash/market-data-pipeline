@@ -826,6 +826,35 @@ def _implied_yes_price_kalshi(km: dict) -> float | None:
         return None
 
 
+def _kalshi_leg_ask(km: dict, side: str) -> float | None:
+    """Precio real (0-1) de COMPRAR 'yes' o 'no' en Kalshi -- para
+    arbitraje interesa el ask (lo que de verdad pagarías), no el punto
+    medio que usa _implied_yes_price_kalshi (que sirve para comparar/
+    puntuar candidatos, pero no es lo que se ejecuta en una compra real).
+
+    Para "yes" es directo: el yes_ask del book.
+
+    Para "no" NO hace falta pedir datos extra ni aproximar con
+    1 - yes_mid: en Kalshi, Yes y No son dos vistas del MISMO libro de
+    órdenes (un contrato binario) -- comprar No a precio p es, para el
+    motor de Kalshi, equivalente a vender/ofrecer ("ask") Yes a precio
+    (100 - p). Por eso la relación no_ask = 100 - yes_bid es EXACTA, no
+    una estimación -- confirmado con el usuario, ver charla sobre por
+    qué 1 - yes_mid subestimaba el costo real de comprar "No"."""
+    yes_bid, yes_ask = km.get("yes_bid"), km.get("yes_ask")
+    if yes_bid is None or yes_ask is None:
+        return None
+    try:
+        yes_bid, yes_ask = float(yes_bid), float(yes_ask)
+    except (TypeError, ValueError):
+        return None
+    if side == "yes":
+        return round(yes_ask / 100.0, 4)
+    if side == "no":
+        return round((100.0 - yes_bid) / 100.0, 4)
+    return None
+
+
 # ------------------- señales semánticas (sin LLM, ver charla con el usuario) -------------------
 #
 # El usuario pidió explícitamente NO usar un LLM para esto (más simple, sin
@@ -1091,18 +1120,24 @@ def generate_candidates(
             arbitrage_detail = None
             if poly_price is not None and kalshi_price is not None and price_spread is not None:
                 if price_spread >= ARBITRAGE_MIN_MARGIN:
-                    arbitrage_margin = price_spread
                     if inverted:
                         # "Yes" de una plataforma equivale al "No" de la
                         # otra (mismo evento, lados opuestos) -- comprar el
                         # mismo lado real en ambas (los dos "Yes" o los dos
                         # "No", el que sume menos de $1) cubre el evento.
+                        # El lado de Polymarket se aproxima con último
+                        # precio operado (ver _implied_yes_price_polymarket);
+                        # el de Kalshi usa el ask real de ese lado
+                        # (_kalshi_leg_ask), no el punto medio -- eso es lo
+                        # que de verdad pagarías al comprar.
                         if poly_price + kalshi_price < 1:
                             leg_a, leg_b = "'Yes' en Polymarket", "'Yes' en Kalshi"
-                            cost = poly_price + kalshi_price
+                            kalshi_leg = _kalshi_leg_ask(km, "yes")
+                            cost = poly_price + (kalshi_leg if kalshi_leg is not None else kalshi_price)
                         else:
                             leg_a, leg_b = "'No' en Polymarket", "'No' en Kalshi"
-                            cost = (1 - poly_price) + (1 - kalshi_price)
+                            kalshi_leg = _kalshi_leg_ask(km, "no")
+                            cost = (1 - poly_price) + (kalshi_leg if kalshi_leg is not None else (1 - kalshi_price))
                     else:
                         # "Yes" de una plataforma equivale al "Yes" de la
                         # otra (mismo evento, mismo lado) -- comprar el lado
@@ -1110,15 +1145,29 @@ def generate_candidates(
                         # en la otra cubre el evento.
                         if poly_price < kalshi_price:
                             leg_a, leg_b = "'Yes' en Polymarket", "'No' en Kalshi"
-                            cost = poly_price + (1 - kalshi_price)
+                            kalshi_leg = _kalshi_leg_ask(km, "no")
+                            cost = poly_price + (kalshi_leg if kalshi_leg is not None else (1 - kalshi_price))
                         else:
                             leg_a, leg_b = "'No' en Polymarket", "'Yes' en Kalshi"
-                            cost = (1 - poly_price) + kalshi_price
-                    arbitrage_detail = (
-                        f"Comprar {leg_a} y {leg_b} cuesta ${cost:.2f} combinado -- si de "
-                        f"verdad es el mismo evento, paga $1 seguro (margen "
-                        f"${arbitrage_margin:.2f}, antes de fees/slippage)."
-                    )
+                            kalshi_leg = _kalshi_leg_ask(km, "yes")
+                            cost = (1 - poly_price) + (kalshi_leg if kalshi_leg is not None else kalshi_price)
+                    # El margen se recalcula acá con el costo EXACTO (ask
+                    # real de Kalshi), no se asume igual a price_spread
+                    # (que viene del punto medio) -- pagar el ask siempre
+                    # es un poco peor que el mid, así que el margen real
+                    # de arbitraje puede terminar siendo menor al spread
+                    # aproximado. Si con el costo exacto el margen ya no
+                    # alcanza el mínimo, no se reporta como arbitraje --
+                    # mejor no mostrar una oportunidad que en la práctica
+                    # ya no cubre fees/slippage.
+                    real_margin = round(1 - cost, 4)
+                    if real_margin >= ARBITRAGE_MIN_MARGIN:
+                        arbitrage_margin = real_margin
+                        arbitrage_detail = (
+                            f"Comprar {leg_a} y {leg_b} cuesta ${cost:.2f} combinado -- si de "
+                            f"verdad es el mismo evento, paga $1 seguro (margen "
+                            f"${arbitrage_margin:.2f}, antes de fees/slippage)."
+                        )
 
             # Score combinado (0-100) -- fórmula, no "razonamiento" real
             # sobre el significado de la pregunta (para eso haría falta un
