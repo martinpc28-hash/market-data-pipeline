@@ -49,6 +49,14 @@ OUTPUT_DIR = PROJECT_ROOT / "data"
 
 POLYMARKET_MARKETS_URL = "https://gamma-api.polymarket.com/markets"
 POLYMARKET_EVENTS_URL = "https://gamma-api.polymarket.com/events"
+# Gamma (arriba) da un solo bid/ask por MERCADO (el del outcome primario,
+# ver _implied_yes_price_polymarket) -- no sirve para el book de un
+# token específico como "No". Para eso hace falta la API de CLOB, que sí
+# da precio real por token individual -- se usa nada más para refinar el
+# costo de arbitraje de un candidato que YA calificó con el cálculo
+# aproximado (mid), no para todos los pares, así el costo en tiempo
+# queda acotado (ver _poly_token_ask).
+POLYMARKET_CLOB_PRICE_URL = "https://clob.polymarket.com/price"
 KALSHI_MARKETS_URL = "https://api.elections.kalshi.com/trade-api/v2/markets"
 KALSHI_SERIES_URL = "https://api.elections.kalshi.com/trade-api/v2/series"
 
@@ -798,11 +806,36 @@ def _kalshi_cents(market: dict, field: str) -> int | float | None:
 
 
 def _implied_yes_price_polymarket(pm: dict) -> float | None:
-    """Precio implícito (0-1) de que el outcome "Yes" resuelva positivo,
-    leído de outcome_prices -- busca "Yes" por nombre en vez de asumir
-    que siempre es el índice 0 (el orden de outcomes no está garantizado
-    igual entre mercados)."""
+    """Precio implícito (0-1) de que el outcome "Yes" resuelva positivo.
+
+    Prioridad 1: bid/ask EN VIVO (best_bid/best_ask) -- ya los pedimos y
+    guardamos (ver _normalize_poly_*) pero antes no se usaban para nada,
+    se usaba directamente outcome_prices (último precio OPERADO, que
+    puede estar desactualizado si nadie tradeó ese mercado hace rato).
+    La Gamma API de Polymarket da un solo par bid/ask por mercado, no
+    uno por outcome -- así que solo se usa cuando "Yes" es el outcome en
+    el índice 0, que es la convención casi universal en estos mercados
+    binarios (se verifica en vez de asumirlo a ciegas, para no terminar
+    usando el bid/ask de "No" como si fuera de "Yes").
+
+    Prioridad 2 (fallback): outcome_prices (última operación) buscando
+    "Yes" por nombre -- no asume que siempre es el índice 0, el orden de
+    outcomes no está garantizado igual entre mercados. Se usa cuando no
+    hay bid/ask en vivo (mercado sin liquidez activa) o cuando el índice
+    0 no es confiablemente "Yes"."""
     outcomes = pm.get("outcomes") or []
+    best_bid, best_ask = pm.get("best_bid"), pm.get("best_ask")
+    if (
+        best_bid is not None
+        and best_ask is not None
+        and outcomes
+        and str(outcomes[0]).strip().lower() == "yes"
+    ):
+        try:
+            return round((float(best_bid) + float(best_ask)) / 2.0, 4)
+        except (TypeError, ValueError):
+            pass
+
     prices = pm.get("outcome_prices") or []
     for i, label in enumerate(outcomes):
         if str(label).strip().lower() == "yes" and i < len(prices):
@@ -853,6 +886,56 @@ def _kalshi_leg_ask(km: dict, side: str) -> float | None:
     if side == "no":
         return round((100.0 - yes_bid) / 100.0, 4)
     return None
+
+
+def _poly_token_id_for_label(pm: dict, label: str) -> str | None:
+    """Devuelve el clobTokenId del outcome 'Yes' o 'No' de un mercado de
+    Polymarket, buscando por nombre (mismo criterio que
+    _implied_yes_price_polymarket, no asume índice fijo)."""
+    outcomes = pm.get("outcomes") or []
+    token_ids = pm.get("token_ids") or []
+    for i, o in enumerate(outcomes):
+        if str(o).strip().lower() == label.lower() and i < len(token_ids):
+            return token_ids[i]
+    return None
+
+
+def _poly_token_ask(token_id: str | None, cache: dict) -> float | None:
+    """Precio real (0-1) de COMPRAR un token específico de Polymarket
+    (Yes o No) -- a diferencia de Kalshi, en Polymarket Yes y No son
+    tokens con libros de órdenes REALMENTE separados (no hay fórmula
+    para derivar uno del otro), así que para el ask real de "No" hace
+    falta pedirlo aparte, vía la API de CLOB (no la Gamma que usa el
+    resto de este módulo, que solo da un bid/ask por mercado -- ver
+    POLYMARKET_CLOB_PRICE_URL).
+
+    Se llama solo para candidatos que YA califican como posible
+    arbitraje con el cálculo aproximado (mid) -- no para cada par que
+    matchea por texto -- así el costo en tiempo de la búsqueda queda
+    acotado a un puñado de llamadas, no a cientos. `cache` (compartido
+    dentro de una misma corrida de generate_candidates) evita pedir el
+    mismo token dos veces si aparece en más de un par candidato.
+
+    Si la llamada falla (red, timeout, token inválido) devuelve None --
+    quien llama debe caer de vuelta a la aproximación mid-based en vez
+    de fallar el candidato entero por esto."""
+    if not token_id:
+        return None
+    if token_id in cache:
+        return cache[token_id]
+    price = None
+    try:
+        resp = requests.get(
+            POLYMARKET_CLOB_PRICE_URL, params={"token_id": token_id, "side": "buy"}, timeout=8,
+        )
+        resp.raise_for_status()
+        raw = resp.json().get("price")
+        if raw is not None:
+            price = round(float(raw), 4)
+    except (requests.RequestException, TypeError, ValueError, KeyError):
+        price = None
+    cache[token_id] = price
+    return price
 
 
 # ------------------- señales semánticas (sin LLM, ver charla con el usuario) -------------------
@@ -1069,6 +1152,10 @@ def generate_candidates(
     max_price_spread: float | None = None,
 ) -> list[dict]:
     candidates = []
+    # Compartido entre TODOS los pares de esta corrida -- evita pedirle a
+    # CLOB el mismo token de Polymarket dos veces si aparece en más de un
+    # candidato de arbitraje (ver _poly_token_ask).
+    poly_ask_cache: dict[str, float | None] = {}
     for pm in poly_markets:
         poly_price = _implied_yes_price_polymarket(pm)
         for km in kalshi_markets:
@@ -1118,6 +1205,13 @@ def generate_candidates(
             # arbitraje real, y el dashboard lo marca así.
             arbitrage_margin = None
             arbitrage_detail = None
+            # True cuando el margen de arbitraje reportado (si lo hay)
+            # sigue apoyado en la aproximación 1-mid del lado Polymarket
+            # -- porque no se pudo confirmar el ask real vía CLOB (falló
+            # la llamada, timeout, o no se encontró el token) -- para
+            # avisarlo con una bandera visible en vez de mostrar el
+            # margen como si estuviera confirmado en las dos patas.
+            poly_leg_unverified = False
             if poly_price is not None and kalshi_price is not None and price_spread is not None:
                 if price_spread >= ARBITRAGE_MIN_MARGIN:
                     if inverted:
@@ -1125,42 +1219,62 @@ def generate_candidates(
                         # otra (mismo evento, lados opuestos) -- comprar el
                         # mismo lado real en ambas (los dos "Yes" o los dos
                         # "No", el que sume menos de $1) cubre el evento.
-                        # El lado de Polymarket se aproxima con último
-                        # precio operado (ver _implied_yes_price_polymarket);
-                        # el de Kalshi usa el ask real de ese lado
-                        # (_kalshi_leg_ask), no el punto medio -- eso es lo
-                        # que de verdad pagarías al comprar.
+                        # Primera pasada con el punto medio de cada lado
+                        # (barata, sin red) -- el lado de Kalshi ya usa su
+                        # ask real (_kalshi_leg_ask, exacto, sin costo de
+                        # red extra); Polymarket todavía con la aproximación
+                        # 1-mid acá, se refina más abajo SOLO si esta
+                        # primera pasada ya califica como arbitraje.
                         if poly_price + kalshi_price < 1:
-                            leg_a, leg_b = "'Yes' en Polymarket", "'Yes' en Kalshi"
+                            leg_a, leg_b, poly_side = "'Yes' en Polymarket", "'Yes' en Kalshi", "yes"
                             kalshi_leg = _kalshi_leg_ask(km, "yes")
-                            cost = poly_price + (kalshi_leg if kalshi_leg is not None else kalshi_price)
+                            poly_leg = poly_price
+                            cost = poly_leg + (kalshi_leg if kalshi_leg is not None else kalshi_price)
                         else:
-                            leg_a, leg_b = "'No' en Polymarket", "'No' en Kalshi"
+                            leg_a, leg_b, poly_side = "'No' en Polymarket", "'No' en Kalshi", "no"
                             kalshi_leg = _kalshi_leg_ask(km, "no")
-                            cost = (1 - poly_price) + (kalshi_leg if kalshi_leg is not None else (1 - kalshi_price))
+                            poly_leg = 1 - poly_price
+                            cost = poly_leg + (kalshi_leg if kalshi_leg is not None else (1 - kalshi_price))
                     else:
                         # "Yes" de una plataforma equivale al "Yes" de la
                         # otra (mismo evento, mismo lado) -- comprar el lado
                         # que dice "Yes" en la plataforma más barata y "No"
                         # en la otra cubre el evento.
                         if poly_price < kalshi_price:
-                            leg_a, leg_b = "'Yes' en Polymarket", "'No' en Kalshi"
+                            leg_a, leg_b, poly_side = "'Yes' en Polymarket", "'No' en Kalshi", "yes"
                             kalshi_leg = _kalshi_leg_ask(km, "no")
-                            cost = poly_price + (kalshi_leg if kalshi_leg is not None else (1 - kalshi_price))
+                            poly_leg = poly_price
+                            cost = poly_leg + (kalshi_leg if kalshi_leg is not None else (1 - kalshi_price))
                         else:
-                            leg_a, leg_b = "'No' en Polymarket", "'Yes' en Kalshi"
+                            leg_a, leg_b, poly_side = "'No' en Polymarket", "'Yes' en Kalshi", "no"
                             kalshi_leg = _kalshi_leg_ask(km, "yes")
-                            cost = (1 - poly_price) + (kalshi_leg if kalshi_leg is not None else kalshi_price)
-                    # El margen se recalcula acá con el costo EXACTO (ask
-                    # real de Kalshi), no se asume igual a price_spread
-                    # (que viene del punto medio) -- pagar el ask siempre
-                    # es un poco peor que el mid, así que el margen real
-                    # de arbitraje puede terminar siendo menor al spread
-                    # aproximado. Si con el costo exacto el margen ya no
-                    # alcanza el mínimo, no se reporta como arbitraje --
-                    # mejor no mostrar una oportunidad que en la práctica
-                    # ya no cubre fees/slippage.
+                            poly_leg = 1 - poly_price
+                            cost = poly_leg + (kalshi_leg if kalshi_leg is not None else kalshi_price)
+                    # El margen se recalcula acá con el costo del lado
+                    # Kalshi ya exacto (ask real, no punto medio) -- pagar
+                    # el ask siempre es un poco peor que el mid, así que el
+                    # margen real puede terminar siendo menor al spread
+                    # aproximado. Si con esto ya no alcanza el mínimo, ni
+                    # se intenta refinar Polymarket -- no vale la pena la
+                    # llamada de red para algo que ya no califica.
                     real_margin = round(1 - cost, 4)
+                    if real_margin >= ARBITRAGE_MIN_MARGIN:
+                        # Recién ACÁ, para un candidato que ya calificó,
+                        # vale la pena pedirle a CLOB el ask real del
+                        # token de Polymarket que se está comprando (Yes o
+                        # No según poly_side) -- en vez de la aproximación
+                        # 1-mid. Con caché: si el mismo mercado de
+                        # Polymarket ya se consultó en otro candidato de
+                        # esta corrida, no se vuelve a pedir. Si la
+                        # llamada falla (red, timeout) se sigue usando la
+                        # aproximación mid en vez de perder el candidato.
+                        poly_token_id = _poly_token_id_for_label(pm, poly_side)
+                        poly_leg_real = _poly_token_ask(poly_token_id, poly_ask_cache)
+                        if poly_leg_real is not None:
+                            cost = poly_leg_real + (kalshi_leg if kalshi_leg is not None else cost - poly_leg)
+                            real_margin = round(1 - cost, 4)
+                        else:
+                            poly_leg_unverified = True
                     if real_margin >= ARBITRAGE_MIN_MARGIN:
                         arbitrage_margin = real_margin
                         arbitrage_detail = (
@@ -1207,6 +1321,12 @@ def generate_candidates(
             # semantic_flags, nunca oculto -- el usuario decide con esa
             # info, la fórmula no descarta el candidato por su cuenta.
             semantic_flags = []
+            if arbitrage_margin is not None and poly_leg_unverified:
+                semantic_flags.append(
+                    "El margen de arbitraje no pudo confirmarse con el ask real de "
+                    "Polymarket (falló la consulta al book) -- usa una aproximación "
+                    "para ese lado, el margen real podría ser menor."
+                )
             direction_conflict = _direction_conflict(pm["title"], km["title"])
             if direction_conflict:
                 combined_score = round(combined_score * 0.3, 1)
