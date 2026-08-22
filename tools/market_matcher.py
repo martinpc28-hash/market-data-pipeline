@@ -36,6 +36,7 @@ import argparse
 import json
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -277,27 +278,36 @@ def fetch_kalshi_markets_via_series(keywords: list[str], min_volume: float | Non
     No reemplaza a fetch_kalshi_markets, la complementa: si alguna
     categoría no está bien nombrada acá (ver KALSHI_SERIES_CATEGORIES,
     mejor esfuerzo) o el tema no encaja en ninguna categoría de Kalshi,
-    esto simplemente no aporta nada -- no falla, no rompe la búsqueda."""
-    pattern = re.compile("|".join(re.escape(k) for k in keywords), re.IGNORECASE)
-    matched_tickers = []
-    seen_tickers = set()
+    esto simplemente no aporta nada -- no falla, no rompe la búsqueda.
 
-    for category in KALSHI_SERIES_CATEGORIES:
+    Las 12 categorías (y después cada ticker que matcheó) se consultan EN
+    PARALELO, no una por una -- confirmado en la práctica que recorrerlas
+    en serie (12 requests de hasta 10s cada una, más un request más por
+    cada ticker matcheado) podía sumar varios minutos y hacer que la
+    búsqueda por palabra clave del dashboard superara el timeout de 60s
+    del endpoint -- ver MIRROR_CANDIDATES_TIMEOUT_SECONDS en api/main.py."""
+    pattern = re.compile("|".join(re.escape(k) for k in keywords), re.IGNORECASE)
+
+    def _fetch_category_series(category: str) -> list[dict]:
         try:
             resp = requests.get(KALSHI_SERIES_URL, params={"category": category}, timeout=10)
             resp.raise_for_status()
-            series_list = resp.json().get("series") or []
+            return resp.json().get("series") or []
         except requests.RequestException:
-            continue
-        for s in series_list:
-            ticker = s.get("ticker")
-            title = s.get("title", "")
-            if ticker and ticker not in seen_tickers and pattern.search(title):
-                seen_tickers.add(ticker)
-                matched_tickers.append(ticker)
+            return []
 
-    results = []
-    for ticker in matched_tickers:
+    matched_tickers = []
+    seen_tickers = set()
+    with ThreadPoolExecutor(max_workers=len(KALSHI_SERIES_CATEGORIES)) as pool:
+        for series_list in pool.map(_fetch_category_series, KALSHI_SERIES_CATEGORIES):
+            for s in series_list:
+                ticker = s.get("ticker")
+                title = s.get("title", "")
+                if ticker and ticker not in seen_tickers and pattern.search(title):
+                    seen_tickers.add(ticker)
+                    matched_tickers.append(ticker)
+
+    def _fetch_series_markets(ticker: str) -> list[dict]:
         try:
             resp = requests.get(
                 KALSHI_MARKETS_URL,
@@ -308,35 +318,40 @@ def fetch_kalshi_markets_via_series(keywords: list[str], min_volume: float | Non
             # Mismo cuidado que en fetch_polymarket_markets_via_tags: .get
             # con default solo cubre la clave ausente, no un valor null
             # explícito -- `or []` cubre ambos.
-            markets = resp.json().get("markets") or []
+            return resp.json().get("markets") or []
         except requests.RequestException:
-            continue
+            return []
 
-        for market in markets:
-            volume = (
-                market.get("volume_24h")
-                or market.get("volume_24h_fp")
-                or market.get("volume")
-                or market.get("volume_fp")
-                or 0
-            )
-            volume = float(volume) if volume else 0.0
-            if min_volume is not None and volume < min_volume:
-                continue
+    results = []
+    if matched_tickers:
+        with ThreadPoolExecutor(max_workers=min(16, len(matched_tickers))) as pool:
+            all_markets = pool.map(_fetch_series_markets, matched_tickers)
+        for markets in all_markets:
+            for market in markets:
+                volume = (
+                    market.get("volume_24h")
+                    or market.get("volume_24h_fp")
+                    or market.get("volume")
+                    or market.get("volume_fp")
+                    or 0
+                )
+                volume = float(volume) if volume else 0.0
+                if min_volume is not None and volume < min_volume:
+                    continue
 
-            results.append({
-                "platform": "kalshi",
-                "title": _kalshi_display_title(market),
-                "ticker": market.get("ticker"),
-                "event_ticker": market.get("event_ticker"),
-                "volume_24h": volume,
-                # /markets?series_ticker=X confirmado en vivo que devuelve
-                # yes_bid_dollars/yes_ask_dollars (dólares), NO yes_bid/
-                # yes_ask en centavos como el listado general -- mismo caso
-                # que fetch_kalshi_by_ticker, ver _kalshi_cents.
-                "yes_bid": _kalshi_cents(market, "yes_bid"),
-                "yes_ask": _kalshi_cents(market, "yes_ask"),
-            })
+                results.append({
+                    "platform": "kalshi",
+                    "title": _kalshi_display_title(market),
+                    "ticker": market.get("ticker"),
+                    "event_ticker": market.get("event_ticker"),
+                    "volume_24h": volume,
+                    # /markets?series_ticker=X confirmado en vivo que devuelve
+                    # yes_bid_dollars/yes_ask_dollars (dólares), NO yes_bid/
+                    # yes_ask en centavos como el listado general -- mismo caso
+                    # que fetch_kalshi_by_ticker, ver _kalshi_cents.
+                    "yes_bid": _kalshi_cents(market, "yes_bid"),
+                    "yes_ask": _kalshi_cents(market, "yes_ask"),
+                })
 
     return results
 
@@ -830,14 +845,50 @@ _NUMBER_MULTIPLIERS = {
     "b": 1_000_000_000, "%": 1, "bps": 1,
 }
 
+# Nombres de mes usados tanto para extraer fechas (_extract_month_years,
+# más abajo) como para BORRAR fechas y horas del texto antes de buscar
+# números (ver _strip_date_time_phrases) -- un título como "December 31,
+# 2026" o "11:59 PM ET" tiene dígitos ("31", "11", "59") que no son
+# montos/umbrales del mercado, y si _extract_numbers los toma como tales,
+# dos mercados con la MISMA fecha de resolución pero UMBRALES distintos
+# (ej. "$95,000" vs "$99,999.99") pueden dar "coincide un número" solo
+# porque los dos mencionan el mismo día del mes -- confirmado en la
+# práctica con un caso real reportado por el usuario.
+# Alternativas ordenadas por longitud descendente -- mismo motivo que
+# _NUMBER_RE: "sep" antes que "sept" cortaría "sept" a la mitad.
+_MONTH_NAMES = {
+    "january": 1, "jan": 1, "february": 2, "feb": 2, "march": 3, "mar": 3,
+    "april": 4, "apr": 4, "may": 5, "june": 6, "jun": 6, "july": 7, "jul": 7,
+    "august": 8, "aug": 8, "september": 9, "sept": 9, "sep": 9, "october": 10, "oct": 10,
+    "november": 11, "nov": 11, "december": 12, "dec": 12,
+}
+
+# Borra "December 31, 2026" / "Dec 31 2026" / "December 2026" completos
+# (mes + día opcional + año) y horas tipo "11:59 PM" / "23:59" -- se corre
+# ANTES de _NUMBER_RE, solo dentro de _extract_numbers, así el día del mes
+# y la hora nunca se cuentan como si fueran un monto. _extract_month_years
+# sigue trabajando sobre el texto ORIGINAL sin tocar, no se ve afectada.
+_DATE_TIME_STRIP_RE = re.compile(
+    r"\b(?:" + "|".join(sorted(_MONTH_NAMES, key=len, reverse=True)) + r")\.?\s+"
+    r"(?:\d{1,2}(?:st|nd|rd|th)?,?\s+)?\d{4}\b"
+    r"|\b\d{1,2}:\d{2}\s*(?:am|pm)?\b",
+    re.IGNORECASE,
+)
+
+
+def _strip_date_time_phrases(text: str) -> str:
+    return _DATE_TIME_STRIP_RE.sub(" ", text)
+
 
 def _extract_numbers(text: str) -> set[float]:
     """Extrae montos/umbrales numéricos mencionados en un título (ej.
     "$150k" -> {150000.0}, "25 bps" -> {25.0}) -- pensado para detectar
     cuando dos títulos parecidos en texto en realidad hablan de umbrales
-    distintos (ej. "$100k" vs "$150k")."""
+    distintos (ej. "$100k" vs "$150k"). Las fechas ("December 31, 2026")
+    y horas ("11:59 PM") se quitan antes de buscar números, para que un
+    día del mes o una hora no se confundan con un umbral del mercado."""
     result = set()
-    for raw, suffix in _NUMBER_RE.findall(text):
+    for raw, suffix in _NUMBER_RE.findall(_strip_date_time_phrases(text)):
         cleaned = raw.replace(",", "")
         if not cleaned or cleaned == ".":
             continue
@@ -914,14 +965,8 @@ def _direction_conflict(poly_title: str, kalshi_title: str) -> bool:
     return False
 
 
-# Alternativas ordenadas por longitud descendente -- mismo motivo que
-# _NUMBER_RE: "sep" antes que "sept" cortaría "sept" a la mitad.
-_MONTH_NAMES = {
-    "january": 1, "jan": 1, "february": 2, "feb": 2, "march": 3, "mar": 3,
-    "april": 4, "apr": 4, "may": 5, "june": 6, "jun": 6, "july": 7, "jul": 7,
-    "august": 8, "aug": 8, "september": 9, "sept": 9, "sep": 9, "october": 10, "oct": 10,
-    "november": 11, "nov": 11, "december": 12, "dec": 12,
-}
+# _MONTH_NAMES está definido más arriba, junto a _NUMBER_RE (lo reusa
+# _strip_date_time_phrases para borrar fechas antes de extraer números).
 _MONTH_YEAR_RE = re.compile(
     r"\b(" + "|".join(sorted(_MONTH_NAMES, key=len, reverse=True)) + r")\.?\s+"
     r"(?:\d{1,2}(?:st|nd|rd|th)?,?\s+)?(\d{4})\b",
@@ -943,20 +988,24 @@ def _extract_month_years(text: str) -> set[tuple[int, int]]:
     return result
 
 
-def _month_year_align(poly_title: str, kalshi_title: str) -> bool | None:
+def _month_year_align(poly_title: str, kalshi_title: str) -> bool | None | str:
     """True si algún (mes, año) mencionado en un título coincide con
-    alguno del otro. False en dos casos, ambos señal de mercados
-    distintos: (a) los dos mencionan mes+año pero ninguno coincide, o
-    (b) SOLO uno de los dos títulos menciona mes+año -- si un mercado
-    tiene una fecha de corte explícita y el otro no dice nada al
-    respecto, no hay forma de asumir que resuelven en el mismo momento.
-    None solo cuando NINGUNO de los dos títulos menciona mes+año (sin
-    señal de fecha en ningún lado, no se puede comparar, no penaliza)."""
+    alguno del otro. False cuando los DOS títulos mencionan mes+año pero
+    ninguno coincide (ej. "Dec 2026" vs "Aug 2026") -- señal fuerte de
+    mercados distintos, ambos hablan de fechas puntuales que no son la
+    misma. "asymmetric" cuando SOLO uno de los dos menciona mes+año --
+    señal más débil (muchos títulos simplemente no escriben la fecha
+    aunque resuelvan en el mismo momento, ej. "When will bitcoin hit
+    150k?" sin fecha vs. un título que sí la especifica), no alcanza
+    para asumir con la misma confianza que son mercados distintos como
+    en el caso anterior. None solo cuando NINGUNO de los dos títulos
+    menciona mes+año (sin señal de fecha en ningún lado, no se puede
+    comparar, no penaliza)."""
     a, b = _extract_month_years(poly_title), _extract_month_years(kalshi_title)
     if not a and not b:
         return None
     if bool(a) != bool(b):
-        return False
+        return "asymmetric"
     return not a.isdisjoint(b)
 
 
@@ -1091,28 +1140,59 @@ def generate_candidates(
                     "probablemente NO es el mismo mercado, no solo un Yes/No invertido."
                 )
 
+            # Montos/umbrales y fecha de resolución: a diferencia de
+            # dirección (que sigue siendo señal, no certeza -- dos
+            # títulos pueden "sonar" opuestos por cómo están redactados
+            # sin serlo), un monto o una fecha que NO coincide entre dos
+            # títulos que sí mencionan uno es prácticamente una prueba de
+            # que son mercados distintos (ej. "$45,000" vs "$77,100", o
+            # "Dec 31 2026" vs "Aug 22 2026") -- confirmado con ejemplos
+            # reales del usuario que pasaban el filtro de precio/texto
+            # igual. Por eso ACÁ SÍ se descarta el candidato directo en
+            # vez de solo bajarle el score -- antes se lo dejaba pasar
+            # con un combined_score castigado pero el filtro de min_score
+            # ya se había aplicado sobre el score de texto crudo, ANTES
+            # de este cálculo, así que igual aparecía en la lista.
             numbers_match = _numbers_align(pm["title"], km["title"])
             if numbers_match is False:
-                combined_score = round(combined_score * 0.4, 1)
-                semantic_flags.append(
-                    "Los montos/umbrales mencionados en cada título no coinciden -- "
-                    "probablemente es un mercado con un umbral distinto (ej. $100k vs $150k)."
-                )
+                continue
             elif numbers_match is True:
                 combined_score = round(min(100, combined_score + 5), 1)
                 semantic_flags.append("Coincide un monto/umbral numérico entre ambos títulos.")
 
+            # False (los dos mencionan fecha y no coincide) se descarta
+            # directo, mismo criterio que numbers_match arriba. Pero
+            # "asymmetric" (solo un título menciona fecha) es más débil
+            # -- muy común que un título simplemente no escriba la fecha
+            # aunque sea el mismo mercado (ej. "When will bitcoin hit
+            # 150k?" sin fecha vs. un título que sí la tiene) -- descartar
+            # ese caso perdía pares reales, así que ahí solo se penaliza
+            # el score, no se descarta el candidato.
             month_year_match = _month_year_align(pm["title"], km["title"])
             if month_year_match is False:
+                continue
+            elif month_year_match == "asymmetric":
                 combined_score = round(combined_score * 0.5, 1)
                 semantic_flags.append(
-                    "Los meses/años mencionados en los títulos no coinciden (o solo uno de los "
-                    "dos títulos menciona una fecha puntual) -- probablemente resuelven en "
-                    "momentos distintos."
+                    "Solo uno de los dos títulos menciona una fecha puntual (mes/año) -- "
+                    "no se puede confirmar que resuelvan en el mismo momento."
                 )
             elif month_year_match is True:
                 combined_score = round(min(100, combined_score + 5), 1)
                 semantic_flags.append("Coincide el mes/año mencionado en ambos títulos.")
+
+            # El chequeo `score < min_score` de arriba es sobre el texto
+            # CRUDO, antes de aplicar precio y las señales semánticas --
+            # es un corte rápido para no calcular todo lo demás sobre
+            # títulos totalmente distintos, no el filtro final. Un
+            # candidato con texto parecido pero dirección opuesta (ej.
+            # "sube" vs. "baja") puede terminar con combined_score muy
+            # por debajo de min_score después de la penalización de
+            # dirección -- sin este segundo chequeo, igual aparecía en la
+            # lista porque nunca se lo volvía a filtrar por el score ya
+            # castigado, que es el que de verdad se le muestra al usuario.
+            if combined_score < min_score:
+                continue
 
             candidates.append({
                 "score": round(score, 1),
@@ -1187,25 +1267,64 @@ def find_mirror_candidates(
     y la paginación genérica por palabra clave (fetch_kalshi_markets /
     fetch_polymarket_markets, acotada a DISCOVER_MAX_PAGES_MIRROR
     páginas) -- se deduplica por condition_id/ticker, se prioriza lo que
-    trajo la ruta rápida."""
+    trajo la ruta rápida.
+
+    Dos cosas para que esto responda en un tiempo razonable (confirmado
+    en la práctica: sin esto, una búsqueda con keyword podía superar los
+    60s de timeout del endpoint -- ver MIRROR_CANDIDATES_TIMEOUT_SECONDS
+    en api/main.py):
+      1. Polymarket y Kalshi se consultan EN PARALELO, no uno después del
+         otro (son APIs independientes, no hay motivo para esperar a que
+         termine una para arrancar la otra).
+      2. La paginación genérica de respaldo (lenta: hasta
+         DISCOVER_MAX_PAGES_MIRROR páginas) solo se corre si la ruta
+         rápida por categoría/tag no alcanzó un mínimo razonable de
+         mercados -- si ya encontró suficiente, no vale la pena pagar el
+         costo de la paginación completa además."""
+    # Por debajo de esto, la ruta rápida (tag/categoría) se considera
+    # insuficiente y se complementa con la paginación genérica -- por
+    # encima, se salta ese paso lento por completo.
+    FAST_ROUTE_ENOUGH = 5
+
     if keywords:
-        poly_via_tags = fetch_polymarket_markets_via_tags(keywords, min_volume)
-        poly_via_pages = fetch_polymarket_markets(keywords, 500, DISCOVER_MAX_PAGES_MIRROR, min_volume)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            poly_tags_fut = pool.submit(fetch_polymarket_markets_via_tags, keywords, min_volume)
+            kalshi_series_fut = pool.submit(fetch_kalshi_markets_via_series, keywords, min_volume)
+            poly_via_tags = poly_tags_fut.result()
+            kalshi_via_series = kalshi_series_fut.result()
+
+        poly_via_pages, kalshi_via_pages = [], []
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            fallback_jobs = {}
+            if len(poly_via_tags) < FAST_ROUTE_ENOUGH:
+                fallback_jobs["poly"] = pool.submit(
+                    fetch_polymarket_markets, keywords, 500, DISCOVER_MAX_PAGES_MIRROR, min_volume,
+                )
+            if len(kalshi_via_series) < FAST_ROUTE_ENOUGH:
+                fallback_jobs["kalshi"] = pool.submit(
+                    fetch_kalshi_markets, keywords, 200, DISCOVER_MAX_PAGES_MIRROR, min_volume,
+                )
+            if "poly" in fallback_jobs:
+                poly_via_pages = fallback_jobs["poly"].result()
+            if "kalshi" in fallback_jobs:
+                kalshi_via_pages = fallback_jobs["kalshi"].result()
+
         seen_condition_ids = {m["condition_id"] for m in poly_via_tags if m.get("condition_id")}
         poly_markets = poly_via_tags + [
             m for m in poly_via_pages if m.get("condition_id") not in seen_condition_ids
         ]
-        kalshi_via_series = fetch_kalshi_markets_via_series(keywords, min_volume)
-        kalshi_via_pages = fetch_kalshi_markets(keywords, 200, DISCOVER_MAX_PAGES_MIRROR, min_volume)
         seen_kalshi_tickers = {m["ticker"] for m in kalshi_via_series if m.get("ticker")}
         kalshi_markets = kalshi_via_series + [
             m for m in kalshi_via_pages if m.get("ticker") not in seen_kalshi_tickers
         ]
     else:
-        poly_markets = fetch_trending_polymarket(limit=limit_per_platform, min_volume=min_volume)
-        kalshi_markets = fetch_trending_kalshi(
-            limit=limit_per_platform, max_pages=max_kalshi_pages, min_volume=min_volume,
-        )
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            poly_fut = pool.submit(fetch_trending_polymarket, limit=limit_per_platform, min_volume=min_volume)
+            kalshi_fut = pool.submit(
+                fetch_trending_kalshi, limit=limit_per_platform, max_pages=max_kalshi_pages, min_volume=min_volume,
+            )
+            poly_markets = poly_fut.result()
+            kalshi_markets = kalshi_fut.result()
 
     if not poly_markets or not kalshi_markets:
         return []
