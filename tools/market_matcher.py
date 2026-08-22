@@ -911,16 +911,25 @@ def _extract_numbers(text: str) -> set[float]:
     return result
 
 
-def _numbers_align(poly_title: str, kalshi_title: str) -> bool | None:
+def _numbers_align(poly_title: str, kalshi_title: str) -> bool | None | str:
     """True si algún monto/umbral mencionado en un título coincide con
     alguno del otro. False si ambos títulos mencionan números pero
     ninguno coincide (señal fuerte de mercado distinto, ej. $100k vs
-    $150k). None si alguno de los dos (o ambos) no menciona ningún
-    número -- sin números de un lado no hay nada que comparar, no
-    penaliza."""
+    $150k). "asymmetric" cuando SOLO uno de los dos menciona algún
+    número/monto -- a diferencia de la fecha (donde un título sin fecha
+    puntual todavía puede ser "el mismo mercado" sin especificarla), acá
+    si un título habla de un umbral en dólares concreto y el otro no
+    menciona ningún número, es señal fuerte de que son preguntas
+    distintas (confirmado con casos reales del usuario, ej. "Will a new
+    country buy Bitcoin..." sin monto vs "...above $99,999.99") --
+    se trata como filtro duro, no como penalización suave. None solo
+    cuando NINGUNO de los dos menciona ningún número (sin señal en
+    ningún lado, no se puede comparar, no penaliza)."""
     a, b = _extract_numbers(poly_title), _extract_numbers(kalshi_title)
-    if not a or not b:
+    if not a and not b:
         return None
+    if bool(a) != bool(b):
+        return "asymmetric"
     return not a.isdisjoint(b)
 
 
@@ -1154,7 +1163,15 @@ def generate_candidates(
             # ya se había aplicado sobre el score de texto crudo, ANTES
             # de este cálculo, así que igual aparecía en la lista.
             numbers_match = _numbers_align(pm["title"], km["title"])
-            if numbers_match is False:
+            if numbers_match is False or numbers_match == "asymmetric":
+                # A diferencia de la fecha, acá tratamos "asymmetric"
+                # (solo un título menciona algún monto) igual que False:
+                # confirmado con casos reales del usuario donde un
+                # título sin ningún monto (ej. "Will a new country buy
+                # Bitcoin...") pasaba como candidato contra uno con un
+                # umbral en dólares concreto (ej. "...above $99,999.99")
+                # solo porque no había NADA que comparar -- eran
+                # preguntas distintas, no la misma con precisión distinta.
                 continue
             elif numbers_match is True:
                 combined_score = round(min(100, combined_score + 5), 1)
