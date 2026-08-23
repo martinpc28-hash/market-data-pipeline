@@ -13,3 +13,6 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+
+# Rust (rust-feed/) -- build artifacts, se regeneran con cargo build
+rust-feed/target/

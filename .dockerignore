@@ -8,3 +8,7 @@ __pycache__/
 .pytest_cache/
 tests_manual_check.py
 *.md
+# Build de rust-feed/ -- pesa mucho y se regenera solo dentro del
+# multi-stage build de Dockerfile.rust-feed, no hace falta mandarlo al
+# contexto de build (lo ralentiza para nada, ver Dockerfile.rust-feed).
+rust-feed/target/

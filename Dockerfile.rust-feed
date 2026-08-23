@@ -1,0 +1,37 @@
+# Fase 8 — servicio chico en Rust para el feed "en vivo" de mercados de
+# cripto (Kalshi + Polymarket, por ahora) -- ver rust-feed/src/main.rs.
+# Nace de una charla con el usuario sobre un proyecto de GitHub
+# (poly-kalshi-arb): de ahí se adoptó la idea de emparejar candidatos en
+# tiempo real por WebSocket, NUNCA la ejecución automática de órdenes
+# con dinero real -- este servicio solo lee y expone precios.
+#
+# Dos fuentes por plataforma: polling REST (descubre qué mercados
+# existen) + WebSocket en vivo (actualiza precio apenas la plataforma lo
+# publica). Kalshi por WebSocket necesita las credenciales que ya usa
+# ingestion/ (ver docker-compose.yml, monta ./secrets igual que ahí) --
+# si no están configuradas, esa parte simplemente no arranca, el
+# servicio sigue sirviendo datos igual solo con polling REST.
+#
+# Build multi-stage: la imagen de compilación (con el toolchain de Rust,
+# pesada) se descarta -- a la imagen final solo pasa el binario ya
+# compilado, así queda chica igual que las imágenes de Python del resto
+# del proyecto.
+
+FROM rust:1-slim AS builder
+WORKDIR /app/rust-feed
+COPY rust-feed/Cargo.toml Cargo.toml
+COPY rust-feed/Cargo.lock Cargo.lock
+COPY rust-feed/src src
+RUN cargo build --release
+
+FROM debian:bookworm-slim
+# ca-certificates -- necesario para que rustls valide los certificados
+# TLS de verdad al hablar con Kalshi/Polymarket (sin esto, todas las
+# llamadas HTTPS/WSS fallarían con error de certificado).
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY --from=builder /app/rust-feed/target/release/crypto_live_feed /usr/local/bin/crypto_live_feed
+
+EXPOSE 8090
+CMD ["crypto_live_feed"]

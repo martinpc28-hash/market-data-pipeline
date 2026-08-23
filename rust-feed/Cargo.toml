@@ -1,0 +1,29 @@
+[package]
+name = "crypto_live_feed"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+axum = "0.7"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+http = "1"
+# Firma RSA-PSS/SHA-256 para autenticar el WebSocket de Kalshi -- misma
+# receta que ya usa el proyecto en Python (ver ingestion/kalshi_ingest.py
+# y common/kalshi_rest.py, con la librería `cryptography`), portada acá
+# al equivalente en Rust (RustCrypto).
+rsa = "0.9"
+sha2 = "0.10"
+rand = "0.8"
+base64 = "0.22"
+
+[[bin]]
+name = "crypto_live_feed"
+path = "src/main.rs"

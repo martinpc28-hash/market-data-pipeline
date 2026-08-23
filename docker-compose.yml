@@ -92,6 +92,31 @@ services:
       minio:
         condition: service_healthy
 
+  crypto-live-feed:
+    build:
+      context: .
+      dockerfile: Dockerfile.rust-feed
+    container_name: market_data_crypto_live_feed
+    restart: unless-stopped
+    env_file:
+      - .env
+    # KALSHI_API_KEY_ID/KALSHI_ENV salen del mismo .env que ya usa
+    # ingestion (env_file arriba) -- no hace falta duplicarlos acá.
+    volumes:
+      # Misma clave privada que ya usa el servicio de ingestion (mismo
+      # criterio: de solo lectura, nunca se copia a la imagen) -- la
+      # necesita el WebSocket autenticado de Kalshi (ver
+      # rust-feed/src/kalshi_auth.rs). Sin esto (o sin KALSHI_API_KEY_ID
+      # en .env) el servicio sigue funcionando igual, solo que sin la
+      # parte de Kalshi en vivo por WebSocket -- se loguea un aviso, no
+      # es un error fatal, cae de vuelta a polling REST.
+      - ./secrets:/app/secrets:ro
+    ports:
+      - "8090:8090"   # solo para poder pegarle con curl/el navegador y
+                       # revisar /health mientras se prueba -- la API no
+                       # lo necesita expuesto, le habla por la red interna
+                       # de Compose (ver CRYPTO_LIVE_FEED_URL más abajo).
+
   api:
     build:
       context: .
@@ -103,6 +128,12 @@ services:
     environment:
       TIMESCALE_HOST: timescaledb
       MINIO_ENDPOINT: minio:9000
+      # Dentro de la red de Compose los servicios se resuelven por
+      # nombre -- tools/market_matcher.py intenta esto primero para los
+      # precios de cripto y cae a las APIs externas de Kalshi/Polymarket
+      # si no responde (mismo criterio de fallback que el resto del
+      # proyecto, ver _crypto_live_feed_get en market_matcher.py).
+      CRYPTO_LIVE_FEED_URL: http://crypto-live-feed:8090
     ports:
       - "8000:8000"
     volumes:

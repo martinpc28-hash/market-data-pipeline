@@ -35,6 +35,7 @@ Qué hace la CLI:
 import argparse
 import json
 import math
+import os
 import re
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -69,6 +70,17 @@ KALSHI_SERIES_CATEGORIES = [
     "Politics", "Elections", "Sports", "Crypto", "Climate", "Economics",
     "Financials", "Companies", "Technology", "Health", "World", "Entertainment",
 ]
+
+# Servicio chico en Rust (rust-feed/, Dockerfile.rust-feed) que mantiene
+# un snapshot de mercados de cripto actualizado por polling cada pocos
+# segundos, en vez de las APIs externas de Kalshi/Polymarket consultadas
+# recién cuando alguien busca -- ver _fetch_crypto_live_feed más abajo.
+# Nace de una charla con el usuario sobre un proyecto de GitHub
+# (poly-kalshi-arb) que usa esto para acelerar el matching. Vacío/None
+# si no está configurado (ej. corriendo el CLI de este módulo suelto,
+# sin Docker Compose) -- ahí simplemente no se usa, sin romper nada.
+CRYPTO_LIVE_FEED_URL = os.environ.get("CRYPTO_LIVE_FEED_URL")
+CRYPTO_LIVE_FEED_TIMEOUT_SECONDS = 2.0
 
 # Cuántas páginas como máximo se recorren al buscar candidatos a mercado
 # espejo CON palabras clave (find_mirror_candidates) -- más generoso que
@@ -929,10 +941,11 @@ def _poly_token_ask(token_id: str | None, cache: dict) -> float | None:
             POLYMARKET_CLOB_PRICE_URL, params={"token_id": token_id, "side": "buy"}, timeout=8,
         )
         resp.raise_for_status()
-        raw = resp.json().get("price")
+        body = resp.json()
+        raw = body.get("price") if isinstance(body, dict) else None
         if raw is not None:
             price = round(float(raw), 4)
-    except (requests.RequestException, TypeError, ValueError, KeyError):
+    except (requests.RequestException, TypeError, ValueError, KeyError, AttributeError):
         price = None
     cache[token_id] = price
     return price
@@ -1443,6 +1456,110 @@ def generate_candidates(
     return candidates
 
 
+def _is_crypto_search(keywords: list[str] | None) -> bool:
+    """True si la búsqueda parece ser de cripto -- el feed en vivo
+    (crypto-live-feed) solo cubre ese tema por ahora (ver charla con el
+    usuario, "empezar chico"), así que solo tiene sentido intentarlo acá.
+    Para cualquier otro tema (elecciones, deportes, etc.) el feed no
+    tendría los datos igual, así que ni se intenta -- se va directo a
+    las rutas de siempre."""
+    if not keywords:
+        return False
+    crypto_words = {w.lower() for w in CATEGORY_KEYWORDS.get("Crypto", [])}
+    return any(str(kw).strip().lower() in crypto_words for kw in keywords)
+
+
+def _fetch_crypto_live_feed(
+    min_volume: float | None = None,
+) -> tuple[list[dict], list[dict]] | None:
+    """Intenta traer los precios de cripto desde crypto-live-feed (Rust,
+    ver rust-feed/) en vez de pegarle directo a Kalshi/Polymarket -- el
+    feed hace polling cada pocos segundos, así que sirve datos "casi en
+    vivo" sin esperar la red externa en el momento de la búsqueda.
+
+    Devuelve None si no está configurado (CRYPTO_LIVE_FEED_URL vacío,
+    normal si no se está corriendo con Docker Compose), o si falla la
+    llamada (servicio caído, arrancando todavía, timeout) -- quien llama
+    debe caer de vuelta a las rutas normales (fetch_*_via_tags/series)
+    en cualquiera de los dos casos, nunca fallar la búsqueda por esto."""
+    if not CRYPTO_LIVE_FEED_URL:
+        return None
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            kalshi_fut = pool.submit(
+                requests.get,
+                f"{CRYPTO_LIVE_FEED_URL}/prices/kalshi",
+                timeout=CRYPTO_LIVE_FEED_TIMEOUT_SECONDS,
+            )
+            poly_fut = pool.submit(
+                requests.get,
+                f"{CRYPTO_LIVE_FEED_URL}/prices/polymarket",
+                timeout=CRYPTO_LIVE_FEED_TIMEOUT_SECONDS,
+            )
+            kalshi_resp = kalshi_fut.result()
+            poly_resp = poly_fut.result()
+        kalshi_resp.raise_for_status()
+        poly_resp.raise_for_status()
+        kalshi_raw = kalshi_resp.json()
+        poly_raw = poly_resp.json()
+        if not isinstance(kalshi_raw, list) or not isinstance(poly_raw, list):
+            # Respuesta inesperada (no una lista) -- no debería pasar
+            # nunca contra el servicio real (ver rust-feed/src/http.rs,
+            # siempre devuelve un array), pero mejor tratarlo como "no
+            # disponible" que arriesgar romper toda la búsqueda por un
+            # dato con forma rara de un servicio externo.
+            return None
+    except (requests.RequestException, ValueError, TypeError, AttributeError, KeyError):
+        return None
+
+    kalshi_markets = []
+    for m in kalshi_raw:
+        if not isinstance(m, dict):
+            continue
+        volume = m.get("volume_24h") or 0.0
+        if min_volume is not None and volume < min_volume:
+            continue
+        kalshi_markets.append({
+            "platform": "kalshi",
+            "title": m.get("title") or "",
+            "ticker": m.get("ticker"),
+            "event_ticker": m.get("event_ticker"),
+            "volume_24h": volume,
+            # El feed en Rust ya sirve yes_bid/yes_ask en centavos
+            # (0-100), mismo formato que el resto de este módulo espera
+            # de Kalshi -- no hace falta pasar por _kalshi_cents.
+            "yes_bid": m.get("yes_bid"),
+            "yes_ask": m.get("yes_ask"),
+        })
+
+    poly_markets = []
+    for m in poly_raw:
+        if not isinstance(m, dict):
+            continue
+        volume = m.get("volume_24h") or 0.0
+        if min_volume is not None and volume < min_volume:
+            continue
+        poly_markets.append({
+            "platform": "polymarket",
+            "title": m.get("title") or "",
+            "condition_id": m.get("condition_id"),
+            "outcomes": m.get("outcomes") or [],
+            "token_ids": m.get("token_ids") or [],
+            "outcome_prices": m.get("outcome_prices") or [],
+            "volume_24h": volume,
+            "best_bid": m.get("best_bid"),
+            "best_ask": m.get("best_ask"),
+        })
+
+    if not kalshi_markets or not poly_markets:
+        # El feed puede estar arriba pero todavía no completó su primer
+        # ciclo de polling (arranca vacío, ver state.rs) -- en vez de
+        # devolver un pool a medio llenar, se trata igual que "no
+        # disponible" y se cae a las rutas normales.
+        return None
+    return poly_markets, kalshi_markets
+
+
 def find_mirror_candidates(
     limit_per_platform: int = 200,
     min_score: float = 45.0,
@@ -1490,11 +1607,21 @@ def find_mirror_candidates(
     FAST_ROUTE_ENOUGH = 5
 
     if keywords:
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            poly_tags_fut = pool.submit(fetch_polymarket_markets_via_tags, keywords, min_volume)
-            kalshi_series_fut = pool.submit(fetch_kalshi_markets_via_series, keywords, min_volume)
-            poly_via_tags = poly_tags_fut.result()
-            kalshi_via_series = kalshi_series_fut.result()
+        # Para búsquedas de cripto, antes de pegarle a las APIs externas
+        # de Kalshi/Polymarket, se intenta el feed en vivo local
+        # (crypto-live-feed, Rust) -- ya tiene el snapshot actualizado
+        # por polling, sin esperar la red externa en este momento. Si no
+        # está disponible (no configurado, apagado, o keywords no son de
+        # cripto) devuelve None y se sigue exactamente como antes.
+        live_feed = _fetch_crypto_live_feed(min_volume) if _is_crypto_search(keywords) else None
+        if live_feed is not None:
+            poly_via_tags, kalshi_via_series = live_feed
+        else:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                poly_tags_fut = pool.submit(fetch_polymarket_markets_via_tags, keywords, min_volume)
+                kalshi_series_fut = pool.submit(fetch_kalshi_markets_via_series, keywords, min_volume)
+                poly_via_tags = poly_tags_fut.result()
+                kalshi_via_series = kalshi_series_fut.result()
 
         poly_via_pages, kalshi_via_pages = [], []
         with ThreadPoolExecutor(max_workers=2) as pool:
